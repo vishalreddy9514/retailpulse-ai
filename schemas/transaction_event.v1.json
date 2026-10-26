@@ -1,0 +1,121 @@
+{
+  "additionalProperties": false,
+  "description": "One replayed transaction line.",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "data_origin": {
+      "const": "historical_replay",
+      "default": "historical_replay",
+      "title": "Data Origin",
+      "type": "string"
+    },
+    "event_id": {
+      "description": "deterministic line id",
+      "pattern": "^[0-9a-f]{32}$",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "sequence": {
+      "description": "position in the canonical replay order",
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "replay_run_id": {
+      "minLength": 1,
+      "title": "Replay Run Id",
+      "type": "string"
+    },
+    "invoice": {
+      "pattern": "^[A-Z]?\\d{6}$",
+      "title": "Invoice",
+      "type": "string"
+    },
+    "stock_code": {
+      "maxLength": 20,
+      "minLength": 1,
+      "title": "Stock Code",
+      "type": "string"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "quantity": {
+      "title": "Quantity",
+      "type": "integer"
+    },
+    "unit_price": {
+      "title": "Unit Price",
+      "type": "number"
+    },
+    "customer_id": {
+      "anyOf": [
+        {
+          "pattern": "^\\d+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Customer Id"
+    },
+    "country": {
+      "minLength": 1,
+      "title": "Country",
+      "type": "string"
+    },
+    "event_time": {
+      "description": "original invoice timestamp (UK local time as recorded, no timezone in source)",
+      "format": "date-time",
+      "title": "Event Time",
+      "type": "string"
+    },
+    "ingestion_time": {
+      "description": "UTC time the event was published to Kafka",
+      "format": "date-time",
+      "title": "Ingestion Time",
+      "type": "string"
+    },
+    "source_sheet": {
+      "title": "Source Sheet",
+      "type": "string"
+    },
+    "source_row": {
+      "minimum": 2,
+      "title": "Source Row",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "event_id",
+    "sequence",
+    "replay_run_id",
+    "invoice",
+    "stock_code",
+    "quantity",
+    "unit_price",
+    "country",
+    "event_time",
+    "ingestion_time",
+    "source_sheet",
+    "source_row"
+  ],
+  "title": "TransactionEvent",
+  "type": "object"
+}
