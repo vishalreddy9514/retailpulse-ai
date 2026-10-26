@@ -188,3 +188,27 @@ def test_quality_checks_all_pass_on_mixed_input(make_raw):
     _, report = clean_transactions(raw)
     assert report.rows_in == report.rows_out + report.exact_duplicates_dropped
     assert all(c["passed"] for c in report.quality_checks), report.quality_checks
+
+
+def test_scalar_classifier_agrees_with_vectorised_rules(make_raw):
+    """The stream consumer's classify_line must give the batch result on every combination."""
+    import itertools
+
+    from src.processing.clean_transactions import classify_line
+
+    invoices = ["500001", "C500001", "A500001"]
+    codes = ["85123A", "22222", "DCGS0058", "SP1002", "POST", "M", "GIFT_0001_20", "B"]
+    quantities = [-5, 0, 3]
+    prices = [-1.0, 0.0, 2.5]
+    rows = [
+        (inv, code, "X", q, T, p, None, "UK")
+        for inv, code, q, p in itertools.product(invoices, codes, quantities, prices)
+    ]
+    raw = make_raw(rows)
+    from src.processing.clean_transactions import classify, invalid_reason, normalise
+
+    df = normalise(raw)
+    df["invalid_reason"] = invalid_reason(df)
+    expected = classify(df).tolist()
+    got = [classify_line(i, c, q, p) for i, c, _, q, _, p, _, _ in rows]
+    assert got == expected
