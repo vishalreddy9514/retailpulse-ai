@@ -20,7 +20,7 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 | 4 | Forecasting models and evaluation | done |
 | 5 | Kafka historical event replay (producer) | done |
 | 6 | Streaming processing pipeline (consumer) | done |
-| 7 | Synthetic inventory and stockout risk | planned |
+| 7 | Synthetic inventory and stockout risk | done |
 | 8 | AI copilot (LangGraph tools and RAG) | planned |
 | 9 | FastAPI backend and Streamlit dashboard | planned |
 | 10 | Docker, CI/CD, logging, monitoring, docs | planned |
@@ -97,6 +97,10 @@ src/
   streaming/stream_processor.py     idempotent stateful processing into SQLite (events, daily demand, offsets)
   streaming/kafka_consumer.py       read_committed consumer loop + CLI
   streaming/reconcile.py            stream vs batch daily-demand comparison
+  inventory/synthetic_inventory.py  SYNTHETIC stock, lead time, safety stock, reorder point
+  inventory/risk_engine.py          projected stock, stockout probability, reorder suggestions
+  inventory/approvals.py            human approval workflow with append-only audit log
+config/inventory_assumptions.toml   every synthetic-inventory assumption, in one documented file
 schemas/transaction_event.v1.json   JSON Schema of the event contract (checked by a test)
 docker-compose.yml                  single-node Kafka (KRaft) for local development
 tests/integration/                  tests against a real broker (opt-in)
@@ -365,6 +369,68 @@ The consumer turns the replayed events into the same daily product demand the ba
 * **Latency, live.** Measured from the producer's `ingestion_time` to processing, with the consumer running during an accelerated replay of one trading day (600×, 3,409 events): **p50 167 ms, p95 527 ms, p99 750 ms, max 788 ms**. The floor comes from transactional visibility: the producer commits at least every 0.5 s (`max_batch_age_seconds`, added after a first run showed a 1.3 s tail when batches waited to fill), and the consumer polls with a 0.2 s timeout. Latency measured while catching up a backlog only reflects how old the backlog is, so it isn't reported as processing latency.
 
 Tests: unit tests feed real replay output through simulated partitions and require **exact equality with the batch aggregates** at batch sizes 1, 3 and 100. They also cover redelivery, re-replay, rollback on a crash mid-batch, poison messages, and a cancellation that arrives before its sale. The integration test runs producer → Kafka → consumer (stopped and resumed) → reconcile, then a full re-replay, against a real broker.
+
+## Inventory and stockout risk (synthetic inventory)
+
+> **The inventory data is synthetic.** UCI Online Retail II has no stock levels, purchase orders or supplier lead times. Every stock figure in RetailPulse is generated from [`config/inventory_assumptions.toml`](config/inventory_assumptions.toml). None of it is the retailer's real inventory. Every row carries `is_synthetic = True` and a `SYNTHETIC` label, and every output records the assumptions version it was produced with.
+
+```bash
+python -m src.inventory.synthetic_inventory --as-of 2011-12-08   # the synthetic snapshot (CSV)
+python -m src.inventory.risk_engine                              # risk + reorder suggestions
+python -m src.inventory.risk_engine --evaluate                   # calibration check
+python -m src.inventory.approvals register data/inventory/stockout_risk_2011-12-08.parquet
+python -m src.inventory.approvals list
+python -m src.inventory.approvals approve <suggestion_id> --by "Your Name" --note "why"
+```
+
+### Synthetic inventory assumptions
+
+| field | how it is generated |
+|---|---|
+| `lead_time_days` | supplier lead time in trading days, drawn from {3, 5, 7, 10, 14} with weights {20, 35, 25, 15, 5}% |
+| `mean_daily_demand`, `std_daily_demand` | **observed** units/day over the last 56 trading days up to the snapshot date |
+| `safety_stock` | ⌈z × std × √lead time⌉, z for a 95% service level (1.645) |
+| `reorder_point` | ⌈mean × lead time + safety stock⌉ |
+| `current_stock` | uniform(0, 30) trading days of mean demand; uniform{0..20} units if there was no recent demand |
+
+Random draws are seeded per (seed, product, snapshot date), so a snapshot is reproducible and a product's values don't depend on which other products exist. There are no open purchase orders, so projections assume no deliveries within the 7-day horizon.
+
+### Risk method
+
+* **Projected stock** = synthetic current stock − cumulative **forecast** demand for each of the next 7 trading days. `expected_stockout_date` is the first day the expected demand exceeds stock.
+* **Stockout probability** = P(actual demand > stock) by day h. Demand = forecast × r, where r comes from the **empirical distribution of actual/forecast ratios in the model's held-out backtest**, by horizon and forecast size. For a forecast of exactly 0, actual demand is used directly. No normal distribution is assumed. A first version used additive errors. It was clearly wrong near zero demand: it predicted P(any demand) = 0.51 where 29% was observed, and 1.0 for some next-day cases. The ratio model fixed both.
+* **Risk level:** `high` ≥ 50%, `medium` ≥ 20% (configurable).
+* **Reorder suggestion** (order-up-to). It applies when stock ≤ the reorder point, or when expected stock on the delivery day falls below safety stock. Quantity = forecast demand over lead time + 7-day review period + safety stock − stock on hand. Demand beyond the 7 forecast days is extrapolated at the mean forecast rate. `stockout_before_delivery_likely` flags products expected to run out before an order placed now could arrive.
+* Every output column states whether it is synthetic, a model prediction, or derived from both (`value_types`).
+
+### Human approval
+
+Suggestions are only ever `pending_approval`. **RetailPulse never places an order.** `approvals.py` stores each suggestion with its numbers, model version and assumptions version. A named person must approve or reject it, a decision is final, and every action goes into an audit log that SQLite triggers make append-only. "Approved" means accepted for manual ordering outside this system. Because the stock is synthetic, approvals here demonstrate the workflow; they are not real purchase decisions.
+
+### Measured results
+
+**Calibration** ([`reports/inventory_risk_evaluation.md`](reports/inventory_risk_evaluation.md)). The check uses synthetic stock against **actual** demand. The error model is fitted on backtest origins 2011-09-30 to 10-30 and evaluated on 2011-10-31 to 11-30 (126,902 product-origins, 7-day horizon):
+
+| predicted probability | cases | mean predicted | observed rate |
+|---|---:|---:|---:|
+| 0–5% | 67,628 | 1.2% | 2.2% |
+| 5–20% | 28,364 | 11.3% | 14.8% |
+| 20–35% | 14,649 | 26.5% | 31.6% |
+| 35–50% | 6,078 | 42.0% | 49.5% |
+| 50–65% | 4,378 | 56.0% | 61.0% |
+| 65–80% | 2,951 | 71.7% | 78.3% |
+| 80–95% | 2,221 | 87.4% | 90.7% |
+| 95–100% | 633 | 97.1% | 97.2% |
+
+The Brier score is 0.090, against 0.138 for always predicting the base rate (skill 0.35). The probabilities rank risk well, but they are **consistently a few points too low**: 13.9% predicted on average against 16.5% observed. The likely cause is that demand rose from October into the November peak and the forecasts under-predicted it (test bias −5%). Under-stated risk is the unsafe direction, so treat these probabilities as lower bounds. The calibration was not tuned on this window.
+
+**At the last full day (2011-12-08)**, with synthetic stock: 4,719 products, of which 762 are high risk, 827 medium and 3,130 low. There are 2,106 reorder suggestions pending approval.
+
+### Limitations
+
+* Stock, lead times and policy parameters are invented, so the risk *levels* say nothing about the real retailer. What the phase demonstrates is the method and the workflow.
+* One fixed lead time per product, no open orders, no minimum order quantities or pack sizes, and no supplier capacity.
+* The probabilities inherit the forecast's weaknesses (lumpy wholesale demand, peak-season bias) and are calibrated on a single window.
 
 ## Data and AI disclosure
 
