@@ -1,0 +1,51 @@
+{
+  "products": 4719,
+  "trading_days": 604,
+  "first_day": "2009-12-01",
+  "last_day": "2011-12-09",
+  "product_day_rows": 2397712,
+  "zero_share": 0.7791,
+  "partial_days": [
+    "2011-12-09"
+  ],
+  "calendar_check": {
+    "days_checked": 739,
+    "agreement_rate": 0.9986,
+    "traded_on_expected_closed_day": [
+      "2009-12-05"
+    ],
+    "no_sales_on_expected_trading_day": []
+  },
+  "returns_before_first_sale": {
+    "lines": 46,
+    "units": 392
+  },
+  "returns_for_never_sold_products": {
+    "lines": 22,
+    "units": 57
+  },
+  "reversals_outside_product_window": {
+    "lines": 14,
+    "units": 155741
+  },
+  "demand_classes": {
+    "lumpy": 3731,
+    "intermittent": 552,
+    "erratic": 312,
+    "<NA>": 121,
+    "smooth": 3
+  },
+  "history_status": {
+    "sufficient": 4087,
+    "insufficient": 632
+  },
+  "reconciliation": {
+    "units_sold_match_sale_lines": true,
+    "revenue_matches_sale_lines": true,
+    "returns_reconcile": true,
+    "reversals_reconcile": true,
+    "one_row_per_product_day": true,
+    "no_negative_demand": true,
+    "totals_match_products": true
+  }
+}
