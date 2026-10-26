@@ -1,0 +1,60 @@
+{
+  "rows_in": 1044848,
+  "rows_out": 1033036,
+  "exact_duplicates_dropped": 11812,
+  "line_type_counts": {
+    "sale": 1002104,
+    "cancellation_return": 16678,
+    "order_reversal_sale": 1236,
+    "order_reversal_return": 1236,
+    "stock_adjustment": 3391,
+    "zero_price": 2571,
+    "non_product": 5814,
+    "bad_debt_adjustment": 6,
+    "invalid": 0
+  },
+  "invalid_reasons": {},
+  "sale_lines_missing_customer": 226761,
+  "descriptions_filled_from_catalog": 3871,
+  "order_reversal_pairs": 1236,
+  "sale_units": 10977522,
+  "order_reversal_units": 210522,
+  "quality_checks": [
+    {
+      "name": "event_id_unique",
+      "passed": true
+    },
+    {
+      "name": "row_count_conserved",
+      "passed": true
+    },
+    {
+      "name": "every_line_typed",
+      "passed": true
+    },
+    {
+      "name": "sales_positive_qty_and_price",
+      "passed": true
+    },
+    {
+      "name": "returns_negative_qty",
+      "passed": true
+    },
+    {
+      "name": "returns_are_c_invoices",
+      "passed": true
+    },
+    {
+      "name": "sales_have_product_code",
+      "passed": true
+    },
+    {
+      "name": "reversal_pairs_balanced",
+      "passed": true
+    },
+    {
+      "name": "valid_lines_have_timestamp",
+      "passed": true
+    }
+  ]
+}
