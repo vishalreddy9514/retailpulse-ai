@@ -1,0 +1,66 @@
+{
+  "error_model_fitted_on_origins": [
+    "2011-09-30",
+    "2011-10-30"
+  ],
+  "evaluated_origins": [
+    "2011-10-31",
+    "2011-11-30"
+  ],
+  "cases": 126902,
+  "observed_stockout_rate": 0.1649,
+  "mean_predicted_probability": 0.1386,
+  "brier_score": 0.09,
+  "brier_score_base_rate": 0.1377,
+  "brier_skill_score": 0.3463,
+  "reliability": [
+    {
+      "bin": "(-0.001, 0.05]",
+      "cases": 67628,
+      "mean_predicted": 0.0121,
+      "observed_rate": 0.022
+    },
+    {
+      "bin": "(0.05, 0.2]",
+      "cases": 28364,
+      "mean_predicted": 0.1133,
+      "observed_rate": 0.1478
+    },
+    {
+      "bin": "(0.2, 0.35]",
+      "cases": 14649,
+      "mean_predicted": 0.2648,
+      "observed_rate": 0.3163
+    },
+    {
+      "bin": "(0.35, 0.5]",
+      "cases": 6078,
+      "mean_predicted": 0.4199,
+      "observed_rate": 0.4946
+    },
+    {
+      "bin": "(0.5, 0.65]",
+      "cases": 4378,
+      "mean_predicted": 0.5596,
+      "observed_rate": 0.6096
+    },
+    {
+      "bin": "(0.65, 0.8]",
+      "cases": 2951,
+      "mean_predicted": 0.7165,
+      "observed_rate": 0.7831
+    },
+    {
+      "bin": "(0.8, 0.95]",
+      "cases": 2221,
+      "mean_predicted": 0.8735,
+      "observed_rate": 0.9072
+    },
+    {
+      "bin": "(0.95, 1.0]",
+      "cases": 633,
+      "mean_predicted": 0.9709,
+      "observed_rate": 0.9716
+    }
+  ]
+}
