@@ -1,0 +1,92 @@
+{
+  "mode": "offline",
+  "passed": 6,
+  "total": 6,
+  "results": [
+    {
+      "question": "Which products have the highest forecast demand tomorrow?",
+      "passed": true,
+      "checks": {
+        "tools": true,
+        "numbers": true,
+        "labels": true,
+        "limitations": true
+      },
+      "tools_called": [
+        "top_forecast_demand"
+      ],
+      "unverified": []
+    },
+    {
+      "question": "Which products have unusual sales patterns?",
+      "passed": true,
+      "checks": {
+        "tools": true,
+        "numbers": true,
+        "labels": true,
+        "limitations": true
+      },
+      "tools_called": [
+        "unusual_sales"
+      ],
+      "unverified": []
+    },
+    {
+      "question": "Which products are at risk of stockout in the next seven days?",
+      "passed": true,
+      "checks": {
+        "tools": true,
+        "numbers": true,
+        "labels": true,
+        "limitations": true
+      },
+      "tools_called": [
+        "stockout_risk"
+      ],
+      "unverified": []
+    },
+    {
+      "question": "Why has demand for SMALL POPCORN HOLDER changed compared with its recent baseline?",
+      "passed": true,
+      "checks": {
+        "tools": true,
+        "numbers": true,
+        "labels": true,
+        "limitations": true
+      },
+      "tools_called": [
+        "product_info",
+        "explain_demand_change"
+      ],
+      "unverified": []
+    },
+    {
+      "question": "What reorder quantity is suggested for 22410 under the configured inventory assumptions?",
+      "passed": true,
+      "checks": {
+        "tools": true,
+        "numbers": true,
+        "labels": true,
+        "limitations": true
+      },
+      "tools_called": [
+        "reorder_suggestion"
+      ],
+      "unverified": []
+    },
+    {
+      "question": "How are returns and cancellations handled in the demand figures?",
+      "passed": true,
+      "checks": {
+        "tools": true,
+        "numbers": true,
+        "labels": true,
+        "limitations": true
+      },
+      "tools_called": [
+        "search_docs"
+      ],
+      "unverified": []
+    }
+  ]
+}
