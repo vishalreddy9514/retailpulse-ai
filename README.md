@@ -8,6 +8,24 @@ RetailPulse AI forecasts product-level daily demand for an online retailer. It f
 > * **"Real-time" is simulated.** A Kafka producer replays those *historical* transactions in timestamp order. The application does **not** receive live transactions from the retailer.
 > * **Inventory is synthetic.** The dataset has no stock levels or supplier lead times. The inventory figures are generated, clearly labelled assumptions, not the retailer's real stock.
 
+## Architecture
+
+```
+UCI workbook ─► ingest + verify ─► clean + label lines ─► product × trading-day demand ─► LightGBM forecasts
+     │                                                        ▲                                │
+     │  (historical replay, simulated real-time)             │ identical numbers (reconciled)  ▼
+     └─► Kafka producer ─► Kafka (transactions) ─► consumer ─► SQLite stream state    SYNTHETIC inventory
+                                                                                      ─► stockout risk
+                                                                                      ─► reorder suggestions
+                                                                                         (human approval)
+                         services (every number + provenance)
+                ┌──────────────┼─────────────────────┐
+           REST API      copilot (Claude via         Streamlit dashboard
+          (/metrics)      LangGraph + tools + RAG)    (client of the API)
+                │
+            Prometheus ─► alert rules (API, copilot, model accuracy/drift, stream)
+```
+
 ## Status
 
 Built phase by phase. Each phase lands on its own branch and pull request.
@@ -23,9 +41,26 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 | 7 | Synthetic inventory and stockout risk | done |
 | 8 | AI copilot (LangGraph tools and RAG) | done |
 | 9 | FastAPI backend and Streamlit dashboard | done |
-| 10 | Docker, CI/CD, logging, monitoring, docs | planned |
+| 10 | Docker, CI/CD, logging, monitoring, docs | done |
+| — | Optional M5 forecasting benchmark | not started (see [Follow-ups](#known-limitations-and-follow-ups)) |
 
-## Quick start
+## Quick start (Docker)
+
+```bash
+# 1. Build the artifacts (download, clean, aggregate, train ~15 min, forecast, risk) into ./data ./models ./reports
+docker compose build
+RETAILPULSE_UID=$(id -u) RETAILPULSE_GID=$(id -g) docker compose --profile pipeline run --rm pipeline
+
+# 2. Run the stack: Kafka, API :8000, dashboard :8501, stream consumer; plus Prometheus :9090
+docker compose --profile monitoring up -d
+
+# 3. Replay history as a SIMULATED real-time stream (1 hour of history per second)
+docker compose --profile replay up producer
+```
+
+Optional environment: `ANTHROPIC_API_KEY` (Claude copilot; offline mode otherwise) and `RETAILPULSE_API_TOKEN` (require `X-API-Key` on approval writes).
+
+## Quick start (local Python)
 
 Requires Python 3.11+. Reading the Excel workbook takes about 80 seconds, and the result is cached as Parquet.
 
@@ -38,6 +73,7 @@ python -m src.processing.clean_transactions # label every line, run quality chec
 python -m src.processing.aggregate_sales    # product x trading-day demand, reconciled -> data/processed/
 python -m src.forecasting.train             # ~15 min on 4 cores: select, evaluate, save -> models/, reports/
 python -m src.forecasting.predict           # next 1-7 trading days for every product (~20 s)
+python -m src.inventory.risk_engine         # synthetic inventory -> stockout risk + reorder suggestions
 python -m src.ingestion.explore             # regenerate reports/data_profile.md
 
 pytest                                      # unit tests (no download, no broker needed)
@@ -109,10 +145,14 @@ src/
   copilot/cli.py, evaluate.py       command line and evaluation harness
   api/main.py                       FastAPI REST API over the services (+ approvals, copilot)
   dashboard/app.py, api_client.py   Streamlit dashboard, a thin client of the API
+  observability.py                  JSON logging + every Prometheus metric definition
+  monitoring/model_monitor.py       live forecast accuracy (out of sample), input drift, freshness
+monitoring/                         prometheus.yml, alerts.yml, alerts_test.yml (promtool unit tests)
+Dockerfile                          multi-stage: test stage runs lint + unit tests; slim non-root runtime
 tests/e2e/dashboard.e2e.cjs         Playwright browser check of the running dashboard
 config/inventory_assumptions.toml   every synthetic-inventory assumption, in one documented file
 schemas/transaction_event.v1.json   JSON Schema of the event contract (checked by a test)
-docker-compose.yml                  single-node Kafka (KRaft) for local development
+docker-compose.yml                  Kafka, API, dashboard, consumer; profiles: replay, pipeline, monitoring
 tests/integration/                  tests against a real broker (opt-in)
 tests/unit/                         pytest suites on small hand-written fixtures
 reports/                            generated, committed: data profile, cleaning, aggregation, forecast evaluation
@@ -554,6 +594,71 @@ A banner on every page states that the data is a simulated real-time replay of h
 * **Dashboard (3 tests, Streamlit `AppTest`):** the real app runs against the real API in-process. It renders without exceptions, approves a suggestion through the form, and answers a copilot question with verified numbers.
 * **Browser (`tests/e2e/dashboard.e2e.cjs`, Playwright + Chromium, real data):** visits every tab, approves the top suggestion, and asks the copilot; it fails on any page error or Streamlit exception. Run it against live servers.
   * The first runs found real bugs, now fixed: the copilot **Ask** button stayed disabled while a question was being typed (a text area only commits on blur); the pending count showed the page size (200) instead of the total (2,106); suggestions were offered in stock-code order instead of highest risk first; chart end-labels collided; and the risk table showed the risk file's static status instead of the live approval status.
+
+## Operations: logging, metrics, monitoring, CI/CD
+
+### Logging
+
+`RETAILPULSE_LOG_FORMAT=json` (the default in containers) writes one JSON object per line. Every API request logs `request_id` (taken from `X-Request-ID` or generated, and echoed in the response), method, **route template**, path, status and `duration_ms`. Copilot answers log their mode, outcome, verification result, tools used and any unverified numbers. Approval decisions log the suggestion, the decision and the person.
+
+### Metrics (Prometheus)
+
+* **API** (`GET /metrics`): request count and latency by route template (bounded labels: `/products/{stock_code}`, not one series per product), copilot answers by mode/outcome/verified, approval decisions, pending approvals, stockout-risk counts (synthetic), the model's held-out test WAPE, and the latest monitoring results.
+* **Consumer** (`--metrics-port 9101`): messages by result (applied / duplicates / dead letters / already processed), end-to-end latency histogram, batch duration, and the event-time watermark.
+
+### Model monitoring
+
+```bash
+python -m src.monitoring.model_monitor --origin 2011-11-15 --from-backtest   # -> reports/monitoring_report.{json,md}
+```
+
+* **Forecast accuracy, out of sample only.** The monitor scores a forecast against the actuals that arrived after it and compares the result with the held-out test WAPE (degraded if more than 15% worse). A model can't be judged on days it was trained on, so if the model's training window covers the target days, the check reports **`in_sample`** rather than `ok`. This guard was added after the first run scored the *production* model (refit through 2011-12-08) on 16–24 Nov and produced a flattering WAPE of 0.829. With `--from-backtest`, the phase 4 test model's held-out forecasts at 2011-11-15 score **daily WAPE 0.858 and 7-day WAPE 0.515** (bias −20%), against test baselines of 0.989 and 0.593, so the status is `ok`.
+* **Input drift.** PSI of store-wide daily units and of the zero-demand share, last 28 trading days vs the previous 112. Both are flagged at 2011-11-15 (PSI above 3; units/day 17,910 → 26,408). That is the **Q4 seasonal peak**, which is why the alert is informational.
+* **Freshness.** The data must reach the forecast's last target day.
+
+### Alerts
+
+[`monitoring/alerts.yml`](monitoring/alerts.yml) has 10 rules covering:
+
+* the API: down, 5xx rate > 5%, p95 latency > 2 s (excluding the copilot);
+* the copilot: more than 20% of answers with unverified numbers;
+* the model: accuracy degraded, input drift (info), artifacts older than 7 days;
+* the stream: consumer down, p95 end-to-end latency > 5 s, dead letters.
+
+`promtool check` validates the config and rules, and `promtool test rules monitoring/alerts_test.yml` unit-tests that the alerts fire, with the right timing, on synthetic series.
+
+### CI/CD (`.github/workflows/ci.yml`)
+
+| job | what it does |
+|---|---|
+| `test` | ruff lint + format check, all unit tests with `-W error` |
+| `kafka-integration` | starts Kafka from `docker-compose.yml` and runs the producer/consumer integration tests (crash → resume → exactly once; stream vs batch reconcile) |
+| `docker` | builds the **test** stage (lint + unit tests inside the image), builds the runtime image and smoke-tests it, validates the compose file, the Prometheus config and alert rules, and runs the alert unit tests |
+| `publish` | on push to `main` only, after all checks pass: builds the runtime image and pushes it to `ghcr.io/<owner>/retailpulse-ai` (`:sha` and `:latest`) |
+
+### Verified locally
+
+* **Images.** Built with Docker 29. The test stage passes lint and all 144 unit tests inside the image; the runtime image runs as the non-root `retailpulse` user.
+* **The full Compose stack on the real data:**
+  * Kafka, API, dashboard and consumer all became healthy.
+  * The containerised producer replayed 1–8 Dec 2011: 23,893 events. The consumer applied 23,621 and ignored 272 duplicates, which accounts for every event.
+  * Prometheus scraped both the API and the consumer, with all 10 rules loaded.
+  * The Playwright browser check passed against the containerised dashboard.
+* **Bugs found by running the stack, now fixed:**
+  * On a fresh broker the consumer crashed with "unknown topic" because it started before any producer. It now creates the topics idempotently.
+  * `apt` mirrors aren't reachable from every build network. The image now takes the one system library LightGBM needs (`libgomp.so.1`) from the official `python:3.12` image, and runs its healthcheck in Python instead of `curl`. Builds behind a TLS-inspecting proxy can pass its CA as an optional BuildKit secret (see the `Dockerfile` header); it is never stored in the image.
+
+## Known limitations and follow-ups
+
+* **Copilot not evaluated live.** The Claude path is tested with a scripted client, and offline mode scores 6/6. Run `python -m src.copilot.evaluate` with an API key to measure Claude mode (billed API calls).
+* **Forecast accuracy is modest.** Daily product demand here is lumpy wholesale demand: test WAPE is 0.989 daily and 0.593 over 7 days. LightGBM beats the baselines only narrowly. The evaluation covers a single Q4 test window.
+* **Stockout probabilities run a few points low** (13.9% predicted vs 16.5% observed on held-out data), so treat them as lower bounds.
+* **Inventory is synthetic.** Risk levels illustrate the method, not the retailer's position.
+* **Security.** The API's only access control is an optional shared token on approval writes; there is no user authentication. Don't expose it publicly as is.
+* **Image size.** The single runtime image is about 1.2 GB (Streamlit, LightGBM, pandas/pyarrow, Kafka client, LangGraph). Per-service images would shrink it.
+* **Scale.** The stream state is single-instance SQLite. Scaling out would mean one consumer per partition group with a shared store such as Postgres.
+* **Not done: the optional M5 benchmark.** It was left optional by design and wasn't started.
+* **Licence.** The repository has no licence file yet; that choice is the owner's. The data is CC BY 4.0, with attribution above.
 
 ## Data and AI disclosure
 
