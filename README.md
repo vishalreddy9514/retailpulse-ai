@@ -22,7 +22,7 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 | 6 | Streaming processing pipeline (consumer) | done |
 | 7 | Synthetic inventory and stockout risk | done |
 | 8 | AI copilot (LangGraph tools and RAG) | done |
-| 9 | FastAPI backend and Streamlit dashboard | planned |
+| 9 | FastAPI backend and Streamlit dashboard | done |
 | 10 | Docker, CI/CD, logging, monitoring, docs | planned |
 
 ## Quick start
@@ -107,6 +107,9 @@ src/
   copilot/verify.py                 checks every number in an answer against tool results
   copilot/offline.py                deterministic no-LLM mode (tests, CI, no API key)
   copilot/cli.py, evaluate.py       command line and evaluation harness
+  api/main.py                       FastAPI REST API over the services (+ approvals, copilot)
+  dashboard/app.py, api_client.py   Streamlit dashboard, a thin client of the API
+tests/e2e/dashboard.e2e.cjs         Playwright browser check of the running dashboard
 config/inventory_assumptions.toml   every synthetic-inventory assumption, in one documented file
 schemas/transaction_event.v1.json   JSON Schema of the event contract (checked by a test)
 docker-compose.yml                  single-node Kafka (KRaft) for local development
@@ -501,6 +504,56 @@ question ─► Claude (Opus 5.5) ──tool_use──► validated tools ─►
 * "Why did demand change" is descriptive (order count vs order size vs price). The data has no promotions, marketing or real stock-outs, so causes can't be identified.
 * Retrieval is lexical: synonyms that share no words with the docs may miss.
 * Number verification checks that each figure came from a tool, not that the sentence around it uses the figure correctly.
+
+## API and dashboard
+
+```bash
+uvicorn src.api.main:app --port 8000                 # REST API, docs at http://localhost:8000/docs
+streamlit run src/dashboard/app.py                   # dashboard at http://localhost:8501 (uses the API)
+
+export RETAILPULSE_API_TOKEN=change-me               # optional: require X-API-Key on approval writes
+export ANTHROPIC_API_KEY=...                         # optional: Claude copilot (otherwise offline mode)
+```
+
+Both read the artifacts produced by the earlier phases: the processed data, `forecasts_<origin>.parquet` and `stockout_risk_<origin>.parquet`, at the last full trading day.
+
+### REST API
+
+| method | path | returns |
+|---|---|---|
+| GET | `/health` | forecast origin, model and assumptions versions, data notes (simulated, synthetic), copilot modes, write-auth mode |
+| GET | `/sales/daily-totals?days=` | store-wide observed daily units, revenue, returns |
+| GET | `/sales/unusual?recent_days=&limit=` | unusual observed sales vs each product's baseline |
+| GET | `/forecasts/top?horizon=&limit=` | highest forecast demand for a horizon of 1–7 trading days |
+| GET | `/products/search?q=` | product lookup (retrieval over the catalogue) |
+| GET | `/products/{code}` | observed history + 7-day forecast |
+| GET | `/products/{code}/demand-change` | recent vs baseline decomposition |
+| GET | `/inventory/risk?min_level=&limit=` | stockout risk (synthetic stock) with **live** approval status |
+| GET | `/inventory/reorder/{code}` | reorder calculation with every input |
+| GET | `/approvals`, `/approvals/{id}` | suggestions and their audit history |
+| POST | `/approvals/{id}/decision` | `{"decision": "approve"\|"reject", "actor": "name", "note": "..."}` |
+| POST | `/copilot/ask` | `{"question": "...", "mode": "auto"\|"claude"\|"offline"}` |
+
+Every read response is a service result with `value_types`, `forecast_origin`, units, versions and `limitations`, the same envelope the copilot's tools use. Errors map to HTTP status codes: unknown product 404, invalid input 422, a suggestion that is already decided 409, and Claude mode requested without credentials 503. **Approval writes record a named person's decision and never place an order.** When `RETAILPULSE_API_TOKEN` is set they also require `X-API-Key`. Without it the API runs in open local-development mode, and `/health` and the dashboard say so. There is no user authentication beyond that token, so don't expose the API publicly as it stands.
+
+### Dashboard
+
+The dashboard has five tabs, all served by the API:
+
+* **Overview:** observed daily units, revenue and returns.
+* **Forecasts:** top-N by horizon, and a product chart of observed history against the dashed forecast, with the forecast origin marked, plus a "why did demand change" panel.
+* **Unusual sales.**
+* **Stockout risk & approvals:** risk counts and table, labelled synthetic. The highest-risk pending suggestions come first, with their full details, and an approve/reject form that requires your name.
+* **Copilot:** a mode switch, example questions, the answer with its number-check badge, and the tool calls and provenance behind it.
+
+A banner on every page states that the data is a simulated real-time replay of historical data and that the inventory is synthetic. The chart colours are the first two slots of a validated categorical palette (colourblind separation ΔE ≥ 24.7 in light and dark modes). The forecast is also dashed and directly labelled, so its identity never depends on colour alone.
+
+### Verification
+
+* **API (8 tests, FastAPI `TestClient`, synthetic artifacts):** provenance on every read endpoint, error-to-status mapping, the approval flow (approve, 409 on a second decision, 404 for an unknown id, 422 for a blank name, live status visible in the risk view), token enforcement, the offline copilot, the 503 for Claude without a key, and the copilot factory.
+* **Dashboard (3 tests, Streamlit `AppTest`):** the real app runs against the real API in-process. It renders without exceptions, approves a suggestion through the form, and answers a copilot question with verified numbers.
+* **Browser (`tests/e2e/dashboard.e2e.cjs`, Playwright + Chromium, real data):** visits every tab, approves the top suggestion, and asks the copilot; it fails on any page error or Streamlit exception. Run it against live servers.
+  * The first runs found real bugs, now fixed: the copilot **Ask** button stayed disabled while a question was being typed (a text area only commits on blur); the pending count showed the page size (200) instead of the total (2,106); suggestions were offered in stock-code order instead of highest risk first; chart end-labels collided; and the risk table showed the risk file's static status instead of the live approval status.
 
 ## Data and AI disclosure
 

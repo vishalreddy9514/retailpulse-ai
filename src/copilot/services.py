@@ -248,6 +248,9 @@ class RetailPulseServices:
         r = r.sort_values(["stockout_probability_7d", "forecast_units_7d"], ascending=False)
         counts = self.a.risk["risk_level"].value_counts().to_dict()
         results = [self._risk_row(row) for row in r.head(limit).itertuples()]
+        live = self._approval_statuses([x["suggestion_id"] for x in results if x["suggestion_id"]])
+        for x in results:
+            x["suggestion_status"] = live.get(x["suggestion_id"], x["suggestion_status"])
         return self._envelope(
             "stockout_risk",
             results,
@@ -278,7 +281,23 @@ class RetailPulseServices:
             "earliest_delivery_date": _date(row.earliest_delivery_date),
             "suggested_order_qty": int(row.suggested_order_qty),
             "suggestion_status": row.suggestion_status,
+            "suggestion_id": row.suggestion_id or None,
         }
+
+    def _approval_statuses(self, suggestion_ids: list[str]) -> dict[str, str]:
+        """Live approval status from the approvals store (the risk file only knows 'pending')."""
+        if not suggestion_ids or not self.a.approvals_path:
+            return {}
+        store = ApprovalStore(self.a.approvals_path)
+        try:
+            marks = ",".join("?" * len(suggestion_ids))
+            rows = store.conn.execute(
+                f"SELECT suggestion_id, status FROM suggestions WHERE suggestion_id IN ({marks})",
+                suggestion_ids,
+            )
+            return dict(rows.fetchall())
+        finally:
+            store.close()
 
     @staticmethod
     def _risk_value_types() -> dict:
@@ -513,3 +532,88 @@ class RetailPulseServices:
             {},
             ["Retrieved from this project's documentation; cite the source and section."],
         )
+
+    # -- dashboard views --------------------------------------------------------------------
+    def product_overview(self, stock_code: str, history_days: int = 56) -> dict:
+        """Observed daily history up to the origin plus the 7-day forecast, for one product."""
+        code = self._require_product(stock_code)
+        if not 7 <= history_days <= 365:
+            raise ServiceError("history_days must be 7-365")
+        hist = self.daily[self.daily["stock_code"] == code].sort_values("date").tail(history_days)
+        fc = self.a.forecasts[self.a.forecasts["stock_code"] == code].sort_values(
+            "horizon_trading_days"
+        )
+        return self._envelope(
+            "product_overview",
+            {
+                "stock_code": code,
+                "product_description": self.names.get(code),
+                "history": [
+                    {
+                        "date": _date(r.date),
+                        "units_sold": int(r.units_sold),
+                        "units_returned": int(r.units_returned),
+                    }  # fmt: skip
+                    for r in hist.itertuples()
+                ],
+                "forecast": [
+                    {
+                        "date": _date(r.target_date),
+                        "horizon_trading_days": int(r.horizon_trading_days),
+                        "forecast_units": _round(r.forecast_units, 1),
+                        "method": r.method,
+                    }  # fmt: skip
+                    for r in fc.itertuples()
+                ],
+            },
+            {"history": "observed", "forecast": "model_prediction"},
+            {"units_sold": "units/day", "forecast_units": "units/day"},
+            self._forecast_limits,
+            model_version=self.model_version,
+        )
+
+    @cached_property
+    def _totals(self) -> pd.DataFrame:
+        return (
+            self.daily.groupby("date")
+            .agg(
+                units_sold=("units_sold", "sum"),
+                gross_revenue=("gross_revenue", "sum"),
+                units_returned=("units_returned", "sum"),
+            )  # fmt: skip
+            .reset_index()
+        )
+
+    def daily_totals(self, days: int = 90) -> dict:
+        """Store-wide observed daily totals for the last ``days`` trading days."""
+        if not 7 <= days <= 700:
+            raise ServiceError("days must be 7-700")
+        t = self._totals.tail(days)
+        return self._envelope(
+            "daily_totals",
+            [
+                {
+                    "date": _date(r.date),
+                    "units_sold": int(r.units_sold),
+                    "gross_revenue_gbp": _round(r.gross_revenue, 2),
+                    "units_returned": int(r.units_returned),
+                }  # fmt: skip
+                for r in t.itertuples()
+            ],
+            {"units_sold": "observed", "gross_revenue_gbp": "observed"},
+            {"units_sold": "units/day", "gross_revenue_gbp": "GBP/day"},
+            [
+                "Sale lines only; returns are shown separately "
+                "(see the README's return-handling policy)."
+            ],
+        )
+
+    def status(self) -> dict:
+        return {
+            "forecast_origin": str(self.origin.date()),
+            "model_version": self.model_version,
+            "assumptions_version": str(self.a.risk["assumptions_version"].iloc[0]),
+            "products": int(self.a.forecasts["stock_code"].nunique()),
+            "data_note": SIMULATION_NOTE,
+            "inventory_note": SYNTHETIC_LABEL,
+        }
