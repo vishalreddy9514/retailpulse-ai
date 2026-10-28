@@ -16,7 +16,7 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 |---|---|---|
 | 1 | Download and inspect UCI Online Retail II | done |
 | 2 | Data cleaning and quality checks | done |
-| 3 | Daily product-level demand aggregation | planned |
+| 3 | Daily product-level demand aggregation | done |
 | 4 | Forecasting models and evaluation | planned |
 | 5 | Kafka historical event replay (producer) | planned |
 | 6 | Streaming processing pipeline (consumer) | planned |
@@ -35,6 +35,7 @@ pip install -e ".[dev]"
 
 python -m src.ingestion.uci_loader          # download, verify SHA-256, merge sheets -> data/interim/
 python -m src.processing.clean_transactions # label every line, run quality checks -> data/processed/
+python -m src.processing.aggregate_sales    # product x trading-day demand, reconciled -> data/processed/
 python -m src.ingestion.explore             # regenerate reports/data_profile.md
 
 pytest                                      # unit tests (no download needed)
@@ -61,6 +62,19 @@ order reversal pairs: 1,236
 
 The command exits non-zero if any quality check fails.
 
+Expected output of `python -m src.processing.aggregate_sales` (exit code 0):
+
+```
+products: 4,719  trading days: 604 (2009-12-01 -> 2011-12-09)
+product-day rows: 2,397,712  zero-demand share: 77.9%
+partial days: ['2011-12-09']
+calendar rule agreement: 99.86%
+history status: {'sufficient': 4087, 'insufficient': 632}
+demand classes: {'lumpy': 3731, 'intermittent': 552, 'erratic': 312, '<NA>': 121, 'smooth': 3}
+  [PASS] units_sold_match_sale_lines
+  ... (7 reconciliation checks, all PASS)
+```
+
 ## Project layout
 
 ```
@@ -69,8 +83,10 @@ src/
   ingestion/uci_loader.py           download, verify, read sheets, resolve sheet overlap
   ingestion/explore.py              data profile -> reports/data_profile.md
   processing/clean_transactions.py  normalisation, de-duplication, line labelling, checks
+  processing/trading_calendar.py    rule-based trading calendar (known in advance)
+  processing/aggregate_sales.py     product x trading-day demand, totals, product summary
 tests/unit/                         pytest suites on small hand-written fixtures
-reports/                            generated, committed: data_profile.md, cleaning_report.json
+reports/                            generated, committed: data profile, cleaning and aggregation reports
 data/                               downloaded and derived data (git-ignored)
 ```
 
@@ -144,6 +160,48 @@ The dataset doesn't link a cancellation to the invoice it cancels, and doesn't d
 * **No Saturday trading.** There is only one Saturday with any sales in two years. Forecast horizons are therefore measured in trading days, and calendar features must reflect this.
 * **Sparse demand.** 4,719 products sold at least once, with a median of 68 selling days each. 618 products sold on fewer than 10 days, and 81.4% of product × trading-day cells are zero. Sparse products need explicit handling.
 * **Large legitimate orders.** Wholesale orders of 10,000+ units at £0.10–£0.25 do occur (for example 19,152 mugs to a Danish customer). They are real sales, not errors, so outlier treatment belongs in modelling rather than cleaning.
+
+## Daily demand aggregation
+
+`python -m src.processing.aggregate_sales` turns cleaned lines into three tables in `data/processed/`.
+
+**`product_daily.parquet`**: one row per product per trading day, from the product's first sale to the end of the data. Days without sales are explicit zeros.
+
+| Column | Meaning |
+|---|---|
+| `units_sold` | **Forecast target.** Units on `sale` lines only |
+| `sale_lines`, `invoices`, `customers` | Transaction counts: sale lines, distinct invoices, distinct known customers |
+| `gross_revenue` | GBP value of `sale` lines |
+| `units_returned`, `return_lines`, `return_value` | `cancellation_return` lines on that day, as positive numbers |
+| `units_reversed` | Units in same-day order reversals (excluded from demand, kept for transparency) |
+| `net_units`, `net_revenue` | Sales minus returns. Can be negative on days with returns but no sales |
+| `avg_unit_price` | `gross_revenue / units_sold`. Empty on zero-sale days |
+| `is_partial_day` | The day is cut off by the dataset boundary |
+
+**`daily_totals.parquet`**: store-wide totals per trading day. **`product_summary.parquet`**: per-product history, sparsity and demand class.
+
+### Trading calendar
+
+The shop does not trade on Saturdays, England & Wales bank holidays (including one-offs such as 2011-04-29), Easter Sunday, or 24 December – 3 January. Forecasts need a calendar that is known *in advance*, so `trading_calendar.py` encodes these rules, with bank holidays from the [`holidays`](https://pypi.org/project/holidays/) package. Measured against history, the rule agrees on **738 of 739 days (99.86%)**. The one miss is 2009-12-05, the only Saturday with sales. Historical tables use the observed trading days (604). Future forecast dates use the rule. Forecast horizons are therefore *trading* days: the 7 trading days after 2011-12-09 run to 2011-12-18.
+
+### Decisions and measured results
+
+* **The final day is partial.** The data stops at 12:50 on 2011-12-09, which has 12,943 units against a typical 30–40k. It is flagged `is_partial_day` and must not be used as a full day for training or evaluation. A day is flagged when the data starts later, or stops earlier, than on 90% of trading days.
+* **Product life starts at first sale.** Zero rows before a product's first sale would be false zeros. The dense table has 2,397,712 rows, and 77.9% have zero demand.
+* **Unplaceable lines are reported, not lost.** These are lines dated before a product's first sale, or for products that never had a real sale: 68 return lines (449 units) and 14 order-reversal lines (155,741 units, including the 80,995-unit `23843` order, which is that product's only appearance).
+* **Every run reconciles.** Product-day totals are checked against the cleaned lines for units, revenue, returns and reversals. The command exits non-zero on any mismatch.
+* **Sparsity classes** follow Syntetos–Boylan (average demand interval cut-off 1.32, CV² cut-off 0.49), computed on non-zero demand sizes:
+
+  | demand class | sufficient history | insufficient history |
+  |---|---:|---:|
+  | lumpy | 3,518 | 213 |
+  | intermittent | 266 | 286 |
+  | erratic | 300 | 12 |
+  | smooth | 3 | 0 |
+  | n/a (fewer than 2 selling days) | 0 | 121 |
+
+  "Sufficient" means at least 10 selling days over at least 28 trading days. 2,775 products are both sufficient and sold in the last 28 trading days. Demand here is overwhelmingly lumpy, because many customers are wholesalers. The forecasting phase is designed with that in mind rather than assuming smooth series.
+* **`product_summary` covers the full history and must not be used as a model feature.** It would leak future information. Forecasting recomputes history features at each forecast origin.
 
 ## Data and AI disclosure
 
