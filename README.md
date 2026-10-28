@@ -17,7 +17,7 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 | 1 | Download and inspect UCI Online Retail II | done |
 | 2 | Data cleaning and quality checks | done |
 | 3 | Daily product-level demand aggregation | done |
-| 4 | Forecasting models and evaluation | planned |
+| 4 | Forecasting models and evaluation | done |
 | 5 | Kafka historical event replay (producer) | planned |
 | 6 | Streaming processing pipeline (consumer) | planned |
 | 7 | Synthetic inventory and stockout risk | planned |
@@ -36,6 +36,8 @@ pip install -e ".[dev]"
 python -m src.ingestion.uci_loader          # download, verify SHA-256, merge sheets -> data/interim/
 python -m src.processing.clean_transactions # label every line, run quality checks -> data/processed/
 python -m src.processing.aggregate_sales    # product x trading-day demand, reconciled -> data/processed/
+python -m src.forecasting.train             # ~15 min on 4 cores: select, evaluate, save -> models/, reports/
+python -m src.forecasting.predict           # next 1-7 trading days for every product (~20 s)
 python -m src.ingestion.explore             # regenerate reports/data_profile.md
 
 pytest                                      # unit tests (no download needed)
@@ -85,8 +87,13 @@ src/
   processing/clean_transactions.py  normalisation, de-duplication, line labelling, checks
   processing/trading_calendar.py    rule-based trading calendar (known in advance)
   processing/aggregate_sales.py     product x trading-day demand, totals, product summary
+  forecasting/features.py           leakage-safe origin features, baselines, fallback
+  forecasting/metrics.py            MAE, RMSE, WAPE, bias
+  forecasting/train.py              chronological splits, config selection, evaluation, persistence
+  forecasting/predict.py            reproducible inference from the saved model
 tests/unit/                         pytest suites on small hand-written fixtures
-reports/                            generated, committed: data profile, cleaning and aggregation reports
+reports/                            generated, committed: data profile, cleaning, aggregation, forecast evaluation
+models/                             trained model + metadata (git-ignored, rebuilt by train.py)
 data/                               downloaded and derived data (git-ignored)
 ```
 
@@ -202,6 +209,71 @@ The shop does not trade on Saturdays, England & Wales bank holidays (including o
 
   "Sufficient" means at least 10 selling days over at least 28 trading days. 2,775 products are both sufficient and sold in the last 28 trading days. Demand here is overwhelmingly lumpy, because many customers are wholesalers. The forecasting phase is designed with that in mind rather than assuming smooth series.
 * **`product_summary` covers the full history and must not be used as a model feature.** It would leak future information. Forecasting recomputes history features at each forecast origin.
+
+## Demand forecasting
+
+Forecasts are **model predictions** of `units_sold` (units per trading day) for each product, made at the end of a trading day (the *origin*) for the next 1–7 trading days.
+
+### Method
+
+* **Information available at the origin only.** Features come from a trading-day × product matrix in which every rolling window, lag and expanding statistic ends at the origin. Two tests prove this by multiplying all future data and asserting that no feature changes. A deliberately leaky change (a centred rolling window) makes both tests fail. `predict.py` also truncates its input at the origin before building features.
+* **Features** (35): lags 1–7; rolling means over 7/14/28/56/112 days; rolling std and max; selling-day share; mean non-zero order size; days since last sale; product age; selling days to date; invoice and customer counts; average price and price ratio; return rate; store-wide momentum. Target-day features: horizon, weekday, ISO week, month, day of month, and demand in the same week last year (364 days back, so weekdays align).
+* **Chronological splits by target date:** train up to 2011-06-30, validation 2011-07-01 to 09-30, test 2011-10-01 to 12-08 (the last full day; the partial 2011-12-09 is excluded). Validation chooses the configuration and the number of boosting rounds. The test set is scored once, by a model refit on train + validation. Evaluation is rolling-origin: every trading day in the window is an origin, and every horizon whose target falls inside the window is scored.
+* **Models.** The baselines are a zero forecast, seasonal naive (same weekday, most recent at or before the origin) and a 28-trading-day moving average. The stronger model is a global LightGBM regressor with horizon as a feature, and a small search over Tweedie(1.2), Tweedie(1.5) and Poisson objectives. Training uses one seeded random horizon per (product, origin), giving 1.24M rows instead of 12.5M near-duplicates.
+* **Sparse products, handled explicitly.** A product gets a model forecast only with at least 10 selling days over at least 28 trading days *at the origin*. Otherwise it gets the fallback: a 28-day mean that excludes the launch day. A product enters the data on the day of its first sale, so a plain short-window mean over-forecasts. On validation, the fallback's bias is +11.0% with the launch day and −0.07% without it. A "pad to 28 days" variant had lower error but a −43% bias, which would understate demand for new products, so it was rejected. Products launched after the origin have no history and get a forecast of 0. They are reported as their own segment, not hidden.
+* **Reproducibility.** Fixed seeds, LightGBM `deterministic=True` and a fixed thread count. Two full training runs produced identical numbers. `models/demand_lgbm.json` records the configuration, iteration count, feature list, data fingerprint, training window and library versions. A test checks that a saved and reloaded model gives identical forecasts.
+
+### Measured results (test set, 2011-10-01 to 2011-12-08)
+
+Full tables, including per-horizon WAPE and the validation results, are in [`reports/forecast_evaluation.md`](reports/forecast_evaluation.md).
+
+**Daily demand, model-eligible products** (1,641,260 forecasts, 4,086 products):
+
+| method | MAE | RMSE | WAPE | bias |
+|---|---:|---:|---:|---:|
+| zero | 6.370 | 36.03 | 1.000 | −1.000 |
+| seasonal naive | 7.704 | 42.03 | 1.210 | −0.029 |
+| moving average 28 | 6.391 | **31.62** | 1.003 | −0.055 |
+| **LightGBM** | **6.298** | 31.72 | **0.989** | −0.050 |
+
+**Total demand over the next 7 trading days, model-eligible products** (210,628 product-origins):
+
+| method | MAE | RMSE | WAPE | bias |
+|---|---:|---:|---:|---:|
+| zero | 44.13 | 153.12 | 1.000 | −1.000 |
+| seasonal naive | 31.52 | 121.72 | 0.714 | −0.013 |
+| moving average 28 | 26.86 | **97.05** | 0.609 | −0.045 |
+| **LightGBM** | **26.15** | 100.02 | **0.593** | −0.036 |
+
+**All products, with the fallback and launches included**, the full pipeline scores a 7-day WAPE of 0.603, against 0.624 for the moving average. For fallback products on the 7-day test, the pipeline's WAPE is 0.816 (bias +13%), while seasonal naive scores 0.793.
+
+### What these results do and do not show
+
+* **Daily product-level demand here is barely predictable.** 70% of test product-days are zero, and the largest 1% of product-days carry 36.5% of all units, because many customers are wholesalers placing occasional large orders. A WAPE close to 1 at daily level reflects that, and the zero forecast is a hard baseline on MAE and WAPE. That is why the zero row is reported.
+* **LightGBM is the best method on MAE and WAPE, but by a small margin**: about 1.5% on daily MAE and 2.6% on 7-day MAE over the moving average. On RMSE the moving average is slightly better: the Tweedie model reacts more to large orders, which costs it on squared error. Neither should be described as "accurate". The 7-day totals (WAPE ≈ 0.59) are the more useful signal for replenishment.
+* **The test window is the Q4 peak**, so these numbers may not represent other seasons. The validation window (Q3) results are in the report.
+* **Single-split evaluation.** Results come from one chronological test window, not from repeated backtests over a full year.
+* **The model doesn't know about planned launches, promotions or customer orders placed in advance.** None of these are in the data.
+
+### Inference
+
+```bash
+python -m src.forecasting.predict                       # origin = last full day, 2011-12-08
+python -m src.forecasting.predict --origin 2011-11-15   # any historical full trading day
+```
+
+Output: `data/processed/forecasts_<origin>.parquet`, with one row per product × horizon:
+
+| column | meaning |
+|---|---|
+| `forecast_origin`, `target_date`, `horizon_trading_days` | made at the end of `forecast_origin`; target dates come from the trading-calendar rule |
+| `forecast_units` | predicted units sold (units/day, ≥ 0) |
+| `method` | `lightgbm` or `fallback_mean_28_excl_launch` |
+| `history_status`, `selling_days_to_date` | why that method was used |
+| `recent_mean_28`, `units_last_trading_day`, `trading_days_since_last_sale` | observed evidence at the origin |
+| `model_version`, `value_type` = `model_prediction`, `unit` | provenance, for the copilot and dashboard |
+
+At the default origin, the next trading day is 2011-12-09. That day is partly observed in the source (until 12:50), so it can't be used to judge the forecast as a full day.
 
 ## Data and AI disclosure
 
