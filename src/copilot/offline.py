@@ -121,7 +121,7 @@ class OfflineCopilot:
             f"(observed 28-day mean {x['recent_mean_28_units_per_day']} units/day; {x['method']})"
             for x in rows
         ]
-        return "\n".join([*lines, self._limits(r)])
+        return "\n".join([*lines, "", self._limits(r)])
 
     def _unusual(self, r: dict) -> str:
         lines = [
@@ -132,7 +132,7 @@ class OfflineCopilot:
             f"{x['direction']} (expected {x['expected_units_from_baseline']}; z-score {x['z_score']})"
             for x in r["results"]
         ]
-        return "\n".join([*lines, self._limits(r)])
+        return "\n".join([*lines, "", self._limits(r)])
 
     def _stockout(self, r: dict) -> str:
         lines = [f"Products at high stockout risk over the next 7 trading days after {r['forecast_origin']} "
@@ -143,7 +143,7 @@ class OfflineCopilot:
             f"suggested order {x['suggested_order_qty']} units ({x['suggestion_status']})"
             for x in r["results"]
         ]
-        return "\n".join([*lines, self._limits(r)])
+        return "\n".join([*lines, "", self._limits(r)])
 
     def _change(self, r: dict) -> str:
         x = r["results"]
@@ -162,7 +162,7 @@ class OfflineCopilot:
         lines.append(
             f"Forecast for the next 7 trading days: {f['next_7_trading_days_units']} units ({f['method']})."
         )
-        return "\n".join([*lines, self._limits(r)])
+        return "\n".join([*lines, "", self._limits(r)])
 
     def _reorder(self, r: dict) -> str:
         x = r["results"]
@@ -181,7 +181,7 @@ class OfflineCopilot:
             f"- forecast demand over lead time + review period: {c['forecast_demand_over_cover_units']} units",
             f"- reason: {x['reorder_reason']}",
         ]
-        return "\n".join([*lines, self._limits(r)])
+        return "\n".join([*lines, "", self._limits(r)])
 
     def _docs(self, r: dict) -> str:
         if not r["results"]:
