@@ -19,7 +19,7 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 | 3 | Daily product-level demand aggregation | done |
 | 4 | Forecasting models and evaluation | done |
 | 5 | Kafka historical event replay (producer) | done |
-| 6 | Streaming processing pipeline (consumer) | planned |
+| 6 | Streaming processing pipeline (consumer) | done |
 | 7 | Synthetic inventory and stockout risk | planned |
 | 8 | AI copilot (LangGraph tools and RAG) | planned |
 | 9 | FastAPI backend and Streamlit dashboard | planned |
@@ -94,6 +94,9 @@ src/
   streaming/schema.py               event contract (pydantic), dead-letter payload
   streaming/replay.py               broker-independent replay engine: order, pacing, resume
   streaming/kafka_producer.py       transactional Kafka sink + CLI
+  streaming/stream_processor.py     idempotent stateful processing into SQLite (events, daily demand, offsets)
+  streaming/kafka_consumer.py       read_committed consumer loop + CLI
+  streaming/reconcile.py            stream vs batch daily-demand comparison
 schemas/transaction_event.v1.json   JSON Schema of the event contract (checked by a test)
 docker-compose.yml                  single-node Kafka (KRaft) for local development
 tests/integration/                  tests against a real broker (opt-in)
@@ -331,6 +334,37 @@ Verified on the real broker:
 | `accelerated` | the wait between events is the event-time gap ÷ `--speed`, capped at `--max-gap` seconds, so nights, weekends and Christmas don't stall a demo. `--speed 1` replays at the original pace |
 
 Before any wait of 0.25 s or longer, the open batch is committed, so consumers see events promptly in slow replays.
+
+## Streaming processing (Kafka consumer)
+
+```bash
+python -m src.streaming.kafka_consumer                    # run continuously (Ctrl-C to stop)
+python -m src.streaming.kafka_consumer --idle-exit 15     # catch up, finish the window, stop
+python -m src.streaming.kafka_consumer --status           # counters, latency, offsets
+python -m src.streaming.reconcile                         # stream vs batch, exits 1 on any mismatch
+```
+
+The consumer turns the replayed events into the same daily product demand the batch pipeline builds. Its state is a local SQLite database (`data/stream/stream_state.sqlite`):
+
+| table | contents |
+|---|---|
+| `events` | de-duplicated events, with their line type and per-event latency |
+| `product_daily` (+ `product_daily_view`) | incrementally maintained product × day counters: the batch `product_daily` columns, including distinct invoices and customers |
+| `offsets` | next Kafka offset per partition |
+| `dead_letters` | producer dead-letter records and any poison messages |
+
+**Exactly once.** Each poll batch updates events, aggregates and offsets in **one SQLite transaction**. On start, the consumer assigns partitions explicitly and seeks to its stored offsets. A crash at any point either keeps the whole batch, including its offsets, or none of it. Consumer-group offsets are committed to Kafka too, but only so standard lag tooling works. The consumer reads with `isolation.level=read_committed`, so aborted producer batches are never seen. Events are also de-duplicated on `event_id`, so a deliberate `--from-start` replay changes nothing, and the raw file's exact-duplicate lines are dropped as in batch.
+
+**Same rules as batch.** Lines are classified by `classify_line`, a single-line version of the batch rules; a test checks that both versions agree on all 216 combinations of invoice type, code, quantity and price. Same-day order reversals need state, and one detail matters. In 45 of the 1,236 reversal pairs, the sale arrives *after* its cancellation (same minute, later row). The consumer therefore records a cancellation as a return straight away, and resolves its match only once the partition's event time has moved past that minute. Products are partitioned by stock code, so by then every candidate sale has arrived. The match uses the batch's greedy rule and moves the units into `units_reversed`. A test confirms that dropping this deferral breaks batch parity.
+
+### Measured on the full replay
+
+* **Exact match with batch.** Replaying all 1,044,848 events and consuming them gave 1,033,036 stored events and 11,812 duplicates ignored, matching batch cleaning exactly, and every line-type count was identical. `reconcile` compared **535,156 product-days on 9 metrics** (units, lines, invoices, customers, revenue, returns, return value, reversed units) with **0 mismatches**. The 78 stream rows before a product's first sale hold exactly the 449 returned and 155,741 reversed units that the batch aggregation reports as unplaceable.
+* **Crash recovery.** A consumer killed with `SIGKILL` after 469,930 events and then restarted ended with identical totals: still 11,812 duplicates ignored, meaning no message was applied twice. Reconciliation was again an exact match.
+* **Throughput.** Catching up from a full backlog ran at about 6,700 events/s (1.04M in about 2.5 min), on a 4-core container with SQLite.
+* **Latency, live.** Measured from the producer's `ingestion_time` to processing, with the consumer running during an accelerated replay of one trading day (600×, 3,409 events): **p50 167 ms, p95 527 ms, p99 750 ms, max 788 ms**. The floor comes from transactional visibility: the producer commits at least every 0.5 s (`max_batch_age_seconds`, added after a first run showed a 1.3 s tail when batches waited to fill), and the consumer polls with a 0.2 s timeout. Latency measured while catching up a backlog only reflects how old the backlog is, so it isn't reported as processing latency.
+
+Tests: unit tests feed real replay output through simulated partitions and require **exact equality with the batch aggregates** at batch sizes 1, 3 and 100. They also cover redelivery, re-replay, rollback on a crash mid-batch, poison messages, and a cancellation that arrives before its sale. The integration test runs producer → Kafka → consumer (stopped and resumed) → reconcile, then a full re-replay, against a real broker.
 
 ## Data and AI disclosure
 

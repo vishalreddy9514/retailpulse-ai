@@ -17,7 +17,9 @@ Guarantees, with a transactional sink such as ``KafkaSink``:
 * **Pacing.** ``accelerated`` maps event-time gaps to wall time divided by ``speed``, with
   each gap capped at ``max_gap_seconds`` so nights and weekends don't stall a demo.
   ``fast`` sends as fast as possible, optionally capped at ``max_events_per_second``.
-  An open batch is committed before any noticeable wait, so consumers see events promptly.
+  An open batch is committed before any noticeable wait, and at least every
+  ``max_batch_age_seconds``, so consumers see events promptly (read_committed consumers
+  cannot see an event until its batch commits).
 """
 
 from __future__ import annotations
@@ -92,6 +94,7 @@ class ReplayConfig:
     max_events_per_second: float | None = None  # fast: optional rate cap
     batch_size: int = 1000
     commit_before_wait_seconds: float = 0.25
+    max_batch_age_seconds: float = 0.5  # commit an open batch at least this often
     from_start: bool = False
     topic: str = TOPIC_TRANSACTIONS
     dlq_topic: str = TOPIC_DLQ
@@ -209,6 +212,7 @@ def replay(
     virtual = 0.0
     prev_time: pd.Timestamp | None = None
     in_batch = 0
+    batch_started = started
     sink.begin()
     try:
         for rec in _records(frame):
@@ -230,6 +234,13 @@ def replay(
                     sink.begin()
                 clock.sleep(wait)
                 stats.waited_seconds += wait
+            if in_batch and clock.monotonic() - batch_started >= config.max_batch_age_seconds:
+                sink.commit()
+                stats.batches += 1
+                in_batch = 0
+                sink.begin()
+            if in_batch == 0:
+                batch_started = clock.monotonic()
 
             now = clock.utcnow()
             seq = int(rec["sequence"])
