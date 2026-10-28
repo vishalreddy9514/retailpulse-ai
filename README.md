@@ -21,7 +21,7 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 | 5 | Kafka historical event replay (producer) | done |
 | 6 | Streaming processing pipeline (consumer) | done |
 | 7 | Synthetic inventory and stockout risk | done |
-| 8 | AI copilot (LangGraph tools and RAG) | planned |
+| 8 | AI copilot (LangGraph tools and RAG) | done |
 | 9 | FastAPI backend and Streamlit dashboard | planned |
 | 10 | Docker, CI/CD, logging, monitoring, docs | planned |
 
@@ -100,6 +100,13 @@ src/
   inventory/synthetic_inventory.py  SYNTHETIC stock, lead time, safety stock, reorder point
   inventory/risk_engine.py          projected stock, stockout probability, reorder suggestions
   inventory/approvals.py            human approval workflow with append-only audit log
+  copilot/services.py               backend services: every number the copilot reports, with provenance
+  copilot/tools.py                  strict tool schemas + pydantic validation
+  copilot/knowledge.py              BM25 retrieval over the product catalogue and project docs (RAG)
+  copilot/graph.py                  LangGraph loop: Claude <-> tools -> number verification
+  copilot/verify.py                 checks every number in an answer against tool results
+  copilot/offline.py                deterministic no-LLM mode (tests, CI, no API key)
+  copilot/cli.py, evaluate.py       command line and evaluation harness
 config/inventory_assumptions.toml   every synthetic-inventory assumption, in one documented file
 schemas/transaction_event.v1.json   JSON Schema of the event contract (checked by a test)
 docker-compose.yml                  single-node Kafka (KRaft) for local development
@@ -431,6 +438,69 @@ The Brier score is 0.090, against 0.138 for always predicting the base rate (ski
 * Stock, lead times and policy parameters are invented, so the risk *levels* say nothing about the real retailer. What the phase demonstrates is the method and the workflow.
 * One fixed lead time per product, no open orders, no minimum order quantities or pack sizes, and no supplier capacity.
 * The probabilities inherit the forecast's weaknesses (lumpy wholesale demand, peak-season bias) and are calibrated on a single window.
+
+## AI copilot
+
+```bash
+export ANTHROPIC_API_KEY=...        # Claude mode (or run with --offline)
+python -m src.copilot.cli "Which products are at risk of stockout in the next seven days?"
+python -m src.copilot.cli --json "Why has demand for SMALL POPCORN HOLDER changed?"
+python -m src.copilot.cli --offline "Which products have unusual sales patterns?"
+python -m src.copilot.evaluate --offline       # question-set evaluation (Claude mode: drop --offline)
+```
+
+The copilot answers questions such as *which products have the highest forecast demand tomorrow*, *which have unusual sales patterns*, *which are at risk of stockout in the next seven days*, *why a product's demand changed compared with its recent baseline*, and *what reorder quantity is suggested*. **Every number comes from a backend service, not from the language model.**
+
+### How it works
+
+```
+question ─► Claude (Opus 5.5) ──tool_use──► validated tools ─► services ─► data / forecasts / synthetic inventory
+               ▲    │                                   │
+               └────┼───────── tool results (JSON + provenance) ◄┘
+                    └─end_turn─► number check ─pass─► answer + evidence
+                                     └─fail (once)─► back to Claude with the offending numbers
+```
+
+* **LangGraph** runs the loop as a graph (`model → tools → model … → verify`) with explicit routing for tool calls, end of turn, refusals, token limits and a turn limit.
+* **Claude** is called with the official `anthropic` SDK: model `claude-opus-5-5` at `medium` effort. Thinking is always on for this model. Tools use strict schemas. The system prompt and tools are prompt-cached, and the history is append-only (responses are passed back unchanged). Server-side refusal fallback (`fallbacks: "default"`) is enabled, so a request declined by the model's safety classifiers is retried on Anthropic's recommended model for that category.
+* **Seven tools** (`tools.py`), each a strict JSON schema plus a pydantic model that re-validates the arguments (ranges, stock-code format) before a service runs. Errors go back to Claude as `is_error` tool results so it can correct itself:
+
+  | tool | answers | value types |
+  |---|---|---|
+  | `top_forecast_demand` | highest forecast demand for horizon 1–7 ("tomorrow" = next trading day) | model prediction (+ observed recent mean) |
+  | `unusual_sales` | recent sales furthest from each product's own 56-trading-day baseline | observed |
+  | `stockout_risk` | stockout probability, projected stock, suggested order, approval status | synthetic × model prediction |
+  | `explain_demand_change` | recent vs baseline: units, order count vs order size, customers, price, returns, largest day | observed (+ forecast) |
+  | `reorder_suggestion` | the order-up-to calculation with every input, plus approval status | synthetic × model prediction |
+  | `product_info` | resolve names to stock codes (RAG over the catalogue) | observed |
+  | `search_docs` | method and policy questions (RAG over README, assumptions, reports) | documentation |
+
+* **Provenance on every result:** `forecast_origin` / `data_as_of` (end of trading day), `value_types` per field (observed / model prediction / synthetic), units, model version, assumptions version, and limitations. The limitations include the measured forecast error (test WAPE 0.989 daily, 0.593 over 7 days), the synthetic-inventory label, the need for human approval, the probability calibration bias, and the simulated-real-time note.
+* **Number verification** (`verify.py`): every number in the final answer must match a tool result, allowing rounding and showing a probability as a percentage. Numbers from the question and the horizon numbers 1–7 are also allowed. On a mismatch Claude is told which numbers failed and gets one chance to fix them. If it still fails, the answer is returned **flagged `verified: false`** with the offending numbers, never silently passed.
+* **RAG** (`knowledge.py`): BM25 with light stemming over the product catalogue, and over the README, inventory assumptions and evaluation reports split by heading. Retrieval is lexical and deterministic, which suits short keyword-like product names and documentation phrased in the same vocabulary as the questions.
+* **Offline mode** (`offline.py`): the same tools, keyword intent routing and templated answers, marked `mode: "offline (no LLM)"`. It is used for tests and CI and when no key is available.
+
+### Verification
+
+* 25 unit tests drive the **real** graph, tools and verifier with a scripted stand-in for the Anthropic client. They cover:
+  * the request shape: model, fallback beta, strict tools, no forced `tool_choice`, no thinking or sampling parameters;
+  * the append-only history and the tool loop;
+  * tool-error recovery;
+  * the number-check retry, and flagging when the retry still fails;
+  * refusal handling;
+  * provenance on every tool and strict JSON (no NaN or Infinity);
+  * that the reorder calculation reproduces the suggested quantity;
+  * offline routing for each required question;
+  * retrieval.
+* `python -m src.copilot.evaluate --offline` passes **6/6** on the question set (tools called, numbers verified, labels present).
+* **Not yet run against the live Claude API.** This environment has no Anthropic credentials, so no Claude-mode answer has been produced or measured here. Run `python -m src.copilot.evaluate` (which makes real, billed API calls) to measure Claude mode on the same question set.
+
+### Limitations
+
+* Answers are only as good as the services. The forecasts carry the measured errors above, and the inventory is synthetic.
+* "Why did demand change" is descriptive (order count vs order size vs price). The data has no promotions, marketing or real stock-outs, so causes can't be identified.
+* Retrieval is lexical: synonyms that share no words with the docs may miss.
+* Number verification checks that each figure came from a tool, not that the sentence around it uses the figure correctly.
 
 ## Data and AI disclosure
 
