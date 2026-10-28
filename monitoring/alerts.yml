@@ -1,0 +1,88 @@
+groups:
+  - name: retailpulse-api
+    rules:
+      - alert: RetailPulseApiDown
+        expr: up{job="retailpulse-api"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: RetailPulse API is not responding to scrapes
+          description: Check `docker compose ps api` and its JSON logs; /health must return 200.
+
+      - alert: RetailPulseApiHighErrorRate
+        expr: |
+          sum(rate(retailpulse_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(retailpulse_http_requests_total[5m])), 1e-9) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: More than 5% of API requests fail with 5xx
+          description: Find failing routes with retailpulse_http_requests_total by route and status; correlate request_id in the logs.
+
+      - alert: RetailPulseApiSlow
+        expr: |
+          histogram_quantile(0.95, sum by (le, route) (
+            rate(retailpulse_http_request_duration_seconds_bucket{route!="/copilot/ask"}[5m]))) > 2
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 latency above 2 s on {{ $labels.route }}"
+          description: The copilot route is excluded (LLM calls are slow by design).
+
+  - name: retailpulse-copilot
+    rules:
+      - alert: RetailPulseCopilotUnverifiedAnswers
+        expr: |
+          sum(increase(retailpulse_copilot_answers_total{verified="false"}[1h]))
+            / clamp_min(sum(increase(retailpulse_copilot_answers_total[1h])), 1) > 0.2
+          and sum(increase(retailpulse_copilot_answers_total[1h])) >= 5
+        labels: {severity: warning}
+        annotations:
+          summary: More than 20% of copilot answers contain numbers not found in tool results
+          description: Unverified numbers are returned flagged, never hidden; review the logged `unverified` fields and the prompt.
+
+  - name: retailpulse-model
+    rules:
+      - alert: RetailPulseForecastAccuracyDegraded
+        expr: retailpulse_monitor_degraded{check="forecast_accuracy"} == 1
+        labels: {severity: warning}
+        annotations:
+          summary: Live forecast WAPE is more than 15% worse than the held-out test WAPE
+          description: See reports/monitoring_report.md; consider retraining (python -m src.forecasting.train).
+
+      - alert: RetailPulseInputDrift
+        expr: retailpulse_monitor_degraded{check="input_drift"} == 1
+        labels: {severity: info}
+        annotations:
+          summary: Input distribution shifted (PSI > 0.25)
+          description: Seasonal peaks (Q4) also trigger this; review before acting.
+
+      - alert: RetailPulseArtifactsStale
+        expr: time() - retailpulse_artifacts_loaded_timestamp_seconds > 7 * 86400
+        labels: {severity: info}
+        annotations:
+          summary: The API has served the same forecast artifacts for more than 7 days
+
+  - name: retailpulse-stream
+    rules:
+      - alert: RetailPulseConsumerDown
+        expr: up{job="retailpulse-consumer"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: Stream consumer is not responding to scrapes
+
+      - alert: RetailPulseStreamLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(retailpulse_stream_end_to_end_latency_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: p95 end-to-end stream latency above 5 s
+          description: Producer ingestion_time to processed. During a catch-up from backlog this reflects backlog age, not processing speed.
+
+      - alert: RetailPulseDeadLetters
+        expr: increase(retailpulse_stream_messages_total{result="dead_letters"}[15m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Malformed events reached the dead-letter path
+          description: Inspect the dead_letters table in the stream state DB and retail.transactions.dlq.v1.

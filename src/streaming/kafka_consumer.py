@@ -27,11 +27,15 @@ import logging
 import os
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from confluent_kafka import OFFSET_BEGINNING, Consumer, KafkaError, KafkaException, TopicPartition
+from prometheus_client import start_http_server
 
 from src import config
+from src import observability as obs
+from src.streaming.kafka_producer import ensure_topics
 from src.streaming.schema import TOPIC_DLQ, TOPIC_TRANSACTIONS
 from src.streaming.stream_processor import Message, StreamProcessor
 
@@ -68,6 +72,20 @@ def assign_from_store(consumer: Consumer, processor: StreamProcessor, topics: li
     return assignment
 
 
+def record_metrics(result, seconds: float, watermark: str | None) -> None:
+    for name in ("applied", "duplicates", "dead_letters", "already_processed"):
+        if getattr(result, name):
+            obs.STREAM_MESSAGES.labels(name).inc(getattr(result, name))
+    for ms in result.latencies_ms:
+        obs.STREAM_E2E_LATENCY.observe(ms / 1000)
+    obs.STREAM_BATCH_SECONDS.observe(seconds)
+    obs.STREAM_LAST_PROCESSED.set(time.time())
+    if watermark:
+        obs.STREAM_EVENT_WATERMARK.set(
+            datetime.fromisoformat(watermark).replace(tzinfo=UTC).timestamp()
+        )
+
+
 def run(
     bootstrap: str,
     db_path: Path | str,
@@ -89,6 +107,9 @@ def run(
     totals = {"applied": 0, "duplicates": 0, "dead_letters": 0, "reversals_matched": 0}
     seen = 0
     try:
+        # On a fresh broker the consumer may start before any producer: create the topics
+        # (idempotent, same settings as the producer) rather than failing on unknown topics.
+        ensure_topics(bootstrap, [topic, dlq_topic])
         assign_from_store(consumer, processor, [topic, dlq_topic])
         last_message = time.monotonic()
         while True:
@@ -103,7 +124,9 @@ def run(
                     raise KafkaException(m.error())
                 batch.append(Message(m.topic(), m.partition(), m.offset(), m.value()))
             if batch:
+                started = time.perf_counter()
                 result = processor.process(batch)
+                record_metrics(result, time.perf_counter() - started, processor.event_watermark())
                 for k in totals:
                     totals[k] += getattr(result, k)
                 consumer.commit(
@@ -138,9 +161,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--idle-exit", type=float, help="stop after this many idle seconds")
     parser.add_argument("--max-messages", type=int)
     parser.add_argument("--poll-timeout", type=float, default=0.2, help="max wait per poll (s)")
+    parser.add_argument("--metrics-port", type=int, help="serve Prometheus metrics on this port")
     parser.add_argument("--status", action="store_true", help="print state and exit")
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    obs.configure_logging()
+    if args.metrics_port:
+        start_http_server(args.metrics_port)
 
     if args.status:
         with StreamProcessor(args.db) as processor:
