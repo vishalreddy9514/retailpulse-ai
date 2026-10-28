@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -129,6 +129,7 @@ class BatchResult:
     dead_letters: int = 0
     reversals_matched: int = 0
     already_processed: int = 0
+    latencies_ms: list[float] = field(default_factory=list)  # applied events only
 
 
 class StreamProcessor:
@@ -142,6 +143,11 @@ class StreamProcessor:
         self.dead_letter_topic = dead_letter_topic
 
     # -- offsets ---------------------------------------------------------------------------
+    def event_watermark(self) -> str | None:
+        """Latest event time processed on any partition (historical replay time)."""
+        row = self.conn.execute("SELECT MAX(max_event_time) FROM partition_watermarks").fetchone()
+        return row[0]
+
     def stored_offsets(self) -> dict[tuple[str, int], int]:
         rows = self.conn.execute("SELECT topic, partition, next_offset FROM offsets")
         return {(t, p): o for t, p, o in rows}
@@ -209,6 +215,7 @@ class StreamProcessor:
             result.duplicates += 1
             return
         result.applied += 1
+        result.latencies_ms.append(latency_ms)
         self.conn.execute(
             "INSERT INTO partition_watermarks VALUES (?,?,?) ON CONFLICT(topic, partition) "
             "DO UPDATE SET max_event_time=MAX(max_event_time, excluded.max_event_time)",

@@ -1,0 +1,40 @@
+# promtool test rules monitoring/alerts_test.yml
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="retailpulse-api", instance="api:8000"}'
+        values: '1 1 0 0 0 0'
+      - series: 'retailpulse_monitor_degraded{check="forecast_accuracy"}'
+        values: '0 0 1 1 1 1'
+      - series: 'retailpulse_copilot_answers_total{mode="claude", outcome="answered", verified="false"}'
+        values: '0+3x60'
+      - series: 'retailpulse_copilot_answers_total{mode="claude", outcome="answered", verified="true"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RetailPulseApiDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RetailPulseApiDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: retailpulse-api, instance: "api:8000"}
+            exp_annotations:
+              summary: RetailPulse API is not responding to scrapes
+              description: Check `docker compose ps api` and its JSON logs; /health must return 200.
+      - eval_time: 3m
+        alertname: RetailPulseForecastAccuracyDegraded
+        exp_alerts:
+          - exp_labels: {severity: warning, check: forecast_accuracy}
+            exp_annotations:
+              summary: Live forecast WAPE is more than 15% worse than the held-out test WAPE
+              description: See reports/monitoring_report.md; consider retraining (python -m src.forecasting.train).
+      - eval_time: 60m
+        alertname: RetailPulseCopilotUnverifiedAnswers
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: More than 20% of copilot answers contain numbers not found in tool results
+              description: Unverified numbers are returned flagged, never hidden; review the logged `unverified` fields and the prompt.

@@ -1,0 +1,82 @@
+{
+  "forecast_origin": "2011-11-15",
+  "data_note": "Historical UCI Online Retail II replay; inventory is synthetic.",
+  "forecast_performance": {
+    "origin": "2011-11-15",
+    "target_days": 7,
+    "target_days_with_actuals": 7,
+    "products": 4023,
+    "metrics": {
+      "daily": {
+        "rows": 28161,
+        "mae": 6.0755,
+        "rmse": 24.2617,
+        "wape": 0.8582,
+        "bias": -0.2018
+      },
+      "7d": {
+        "rows": 4023,
+        "mae": 25.512,
+        "rmse": 92.6052,
+        "wape": 0.5148,
+        "bias": -0.2018
+      }
+    },
+    "wape": {
+      "daily": 0.8582,
+      "7d": 0.5148
+    }
+  },
+  "input_drift": {
+    "recent_window": [
+      "2011-10-14",
+      "2011-11-15"
+    ],
+    "reference_window": [
+      "2011-06-05",
+      "2011-10-13"
+    ],
+    "psi": {
+      "store_daily_units": 3.2267,
+      "zero_demand_share": 3.1189
+    },
+    "means": {
+      "store_daily_units": {
+        "reference": 17910.0,
+        "recent": 26408.1
+      },
+      "zero_demand_share": {
+        "reference": 0.804,
+        "recent": 0.7463
+      }
+    }
+  },
+  "checks": {
+    "forecast_accuracy": {
+      "status": "ok",
+      "baseline_wape": {
+        "daily": 0.9887,
+        "7d": 0.5926
+      },
+      "tolerance": 0.15,
+      "worse_than_baseline": {
+        "daily": false,
+        "7d": false
+      }
+    },
+    "input_drift": {
+      "status": "degraded",
+      "threshold": 0.25,
+      "drifted": {
+        "store_daily_units": true,
+        "zero_demand_share": true
+      }
+    },
+    "freshness": {
+      "status": "ok",
+      "last_full_day": "2011-12-08",
+      "last_target_day": "2011-11-23"
+    }
+  },
+  "forecast_source": "held-out backtest (test model)"
+}

@@ -20,6 +20,7 @@ dependencies = [
     "uvicorn>=0.30",
     "streamlit>=1.40",
     "httpx>=0.27",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
@@ -47,3 +48,6 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 # Answer templates read better as unbroken f-strings.
 "src/copilot/offline.py" = ["E501"]
 "src/dashboard/app.py" = ["E501"]
+"src/monitoring/model_monitor.py" = ["E501"]
+"src/observability.py" = ["E501"]
+"tests/unit/test_ops.py" = ["E501"]

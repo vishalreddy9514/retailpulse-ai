@@ -1,5 +1,27 @@
-# Local infrastructure for the simulated real-time pipeline.
-# Single-node Kafka in KRaft mode (no ZooKeeper). Development only: replication factor 1.
+# RetailPulse AI local stack.
+#
+#   docker compose up -d --build                     # kafka, api (:8000), dashboard (:8501), consumer
+#   docker compose --profile replay up producer      # SIMULATED real-time replay of historical data
+#   docker compose --profile monitoring up -d prometheus   # Prometheus (:9090) with alert rules
+#   RETAILPULSE_UID=$(id -u) RETAILPULSE_GID=$(id -g) \
+#     docker compose --profile pipeline run --rm pipeline  # batch: download -> ... -> risk
+#
+# The api/dashboard/consumer read the artifacts in ./data, ./models and ./reports (read-only);
+# build them first with the pipeline profile or the commands in the README. Mutable state
+# (approvals, stream state) lives in the named volume `state`.
+
+x-app: &app
+  image: retailpulse:latest
+  build: .
+  environment:
+    RETAILPULSE_LOG_FORMAT: json
+    RETAILPULSE_APPROVALS_DB: /app/state/approvals.sqlite
+  volumes:
+    - ./data:/app/data:ro
+    - ./models:/app/models:ro
+    - ./reports:/app/reports:ro
+    - state:/app/state
+
 services:
   kafka:
     image: apache/kafka:3.9.1
@@ -27,3 +49,82 @@ services:
       interval: 5s
       timeout: 10s
       retries: 20
+
+  api:
+    <<: *app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      RETAILPULSE_LOG_FORMAT: json
+      RETAILPULSE_APPROVALS_DB: /app/state/approvals.sqlite
+      RETAILPULSE_API_TOKEN: ${RETAILPULSE_API_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+  dashboard:
+    <<: *app
+    restart: unless-stopped
+    command: ["streamlit", "run", "src/dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501",
+              "--server.headless=true", "--browser.gatherUsageStats=false"]
+    ports:
+      - "8501:8501"
+    environment:
+      RETAILPULSE_API_URL: http://api:8000
+      RETAILPULSE_API_TOKEN: ${RETAILPULSE_API_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      api:
+        condition: service_healthy
+
+  consumer:
+    <<: *app
+    restart: unless-stopped
+    command: ["python", "-m", "src.streaming.kafka_consumer", "--bootstrap", "kafka:19092",
+              "--db", "/app/state/stream_state.sqlite", "--metrics-port", "9101"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9101/metrics', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  producer:
+    <<: *app
+    profiles: ["replay"]
+    command: ["python", "-m", "src.streaming.kafka_producer", "--bootstrap", "kafka:19092",
+              "--mode", "accelerated", "--speed", "3600", "--max-gap", "2"]
+    healthcheck:
+      disable: true
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  pipeline:
+    <<: *app
+    profiles: ["pipeline"]
+    user: "${RETAILPULSE_UID:-10001}:${RETAILPULSE_GID:-10001}"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./reports:/app/reports
+    command: ["sh", "-c", "python -m src.ingestion.uci_loader && python -m src.processing.clean_transactions && python -m src.processing.aggregate_sales && python -m src.forecasting.train && python -m src.forecasting.predict && python -m src.inventory.risk_engine && python -m src.inventory.risk_engine --evaluate"]
+    healthcheck:
+      disable: true
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["monitoring"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+
+volumes:
+  state:

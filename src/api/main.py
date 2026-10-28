@@ -19,20 +19,29 @@ and ``/health`` reports that.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import secrets
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
+from src import config
+from src import observability as obs
 from src.copilot.services import Artifacts, RetailPulseServices, ServiceError
 from src.inventory.approvals import DB_PATH, ApprovalError, ApprovalStore
 
 API_TOKEN_ENV = "RETAILPULSE_API_TOKEN"
+MONITORING_REPORT = config.REPORTS_DIR / "monitoring_report.json"
+logger = logging.getLogger("retailpulse.api")
 
 
 class Decision(BaseModel):
@@ -66,10 +75,12 @@ def require_token(x_api_key: Annotated[str | None, Header()] = None) -> None:
 
 def create_app(
     artifacts: Artifacts | None = None,
-    approvals_path: Path | str = DB_PATH,
+    approvals_path: Path | str | None = None,
     copilot_factory=None,
 ) -> FastAPI:
     """Build the app. Tests pass small synthetic ``artifacts`` and a temporary approvals DB."""
+
+    approvals_path = approvals_path or os.environ.get("RETAILPULSE_APPROVALS_DB", DB_PATH)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -83,6 +94,8 @@ def create_app(
         app.state.services = RetailPulseServices(arts)
         app.state.approvals_path = approvals_path
         app.state.copilot_factory = copilot_factory
+        _set_static_gauges(arts, app.state.services)
+        logger.info("artifacts loaded", extra={"fields": app.state.services.status()})
         yield
 
     app = FastAPI(
@@ -93,6 +106,41 @@ def create_app(
         version="0.9.0",
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def log_and_measure(request: Request, call_next):
+        """Request id, JSON access log and Prometheus metrics, keyed by route template."""
+        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
+        start = time.perf_counter()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+        finally:
+            elapsed = time.perf_counter() - start
+            route = getattr(request.scope.get("route"), "path", "unmatched")
+            obs.HTTP_REQUESTS.labels(request.method, route, str(status)).inc()
+            obs.HTTP_LATENCY.labels(request.method, route).observe(elapsed)
+            fields = {
+                "request_id": request_id,
+                "method": request.method,
+                "route": route,
+                "path": request.url.path,
+                "status": status,
+                "duration_ms": round(elapsed * 1000, 1),
+            }
+            logger.info("request", extra={"fields": fields})
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics(request: Request) -> Response:
+        store = ApprovalStore(request.app.state.approvals_path)
+        try:
+            obs.PENDING_APPROVALS.set(len(store.list("pending_approval")))
+        finally:
+            store.close()
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.exception_handler(ServiceError)
     async def service_error(_: Request, exc: ServiceError):
@@ -199,7 +247,19 @@ def create_app(
         store = ApprovalStore(request.app.state.approvals_path)
         decision = "approved" if body.decision == "approve" else "rejected"
         try:
-            return store.decide(suggestion_id, decision, body.actor, body.note)
+            result = store.decide(suggestion_id, decision, body.actor, body.note)
+            obs.APPROVAL_DECISIONS.labels(decision).inc()
+            logger.info(
+                "approval decision",
+                extra={
+                    "fields": {
+                        "suggestion_id": suggestion_id,
+                        "decision": decision,
+                        "actor": body.actor,
+                    }
+                },
+            )
+            return result
         except ApprovalError as exc:
             msg = str(exc)
             code = 404 if "unknown" in msg else 409 if "already" in msg else 422
@@ -231,9 +291,38 @@ def create_app(
             from src.copilot.offline import OfflineCopilot
 
             bot = OfflineCopilot(svc)
-        return bot.ask(body.question).to_dict()
+        ans = bot.ask(body.question)
+        obs.COPILOT_ANSWERS.labels(ans.mode, ans.outcome, str(ans.verified).lower()).inc()
+        logger.info(
+            "copilot answer",
+            extra={"fields": {"mode": ans.mode, "outcome": ans.outcome, "verified": ans.verified,
+                              "tools": [t["tool"] for t in ans.tool_calls],
+                              "unverified": ans.unverified_numbers}},
+        )  # fmt: skip
+        return ans.to_dict()
 
     return app
 
 
+def _set_static_gauges(arts: Artifacts, svc: RetailPulseServices) -> None:
+    obs.FORECAST_ORIGIN.set(svc.origin.timestamp())
+    obs.ARTIFACTS_LOADED.set(time.time())
+    for level, n in arts.risk["risk_level"].value_counts().items():
+        obs.RISK_PRODUCTS.labels(level).set(int(n))
+    ev = arts.forecast_eval
+    obs.MODEL_TEST_WAPE.labels("daily").set(
+        ev["test"]["segments"]["model"]["methods"]["lightgbm"]["wape"]
+    )
+    obs.MODEL_TEST_WAPE.labels("7d").set(ev["test_cumulative_7day"]["model"]["lightgbm"]["wape"])
+    if MONITORING_REPORT.exists():
+        report = json.loads(MONITORING_REPORT.read_text())
+        for window, value in report["forecast_performance"]["wape"].items():
+            obs.MONITOR_WAPE.labels(window).set(value)
+        for check, result in report["checks"].items():
+            obs.MONITOR_STATUS.labels(check).set(0 if result["status"] == "ok" else 1)
+        for feature, psi in report["input_drift"]["psi"].items():
+            obs.INPUT_DRIFT_PSI.labels(feature).set(psi)
+
+
+obs.configure_logging()
 app = create_app()
