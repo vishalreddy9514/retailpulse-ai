@@ -35,6 +35,7 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -158,6 +159,28 @@ def classify(df: pd.DataFrame) -> pd.Series:
     line_type = line_type.mask(inv.str.startswith("A"), BAD_DEBT)
     line_type = line_type.mask(df["invalid_reason"].notna(), INVALID)
     return line_type
+
+
+_PRODUCT_CODE_RE = re.compile(PRODUCT_CODE_PATTERN)
+
+
+def classify_line(invoice: str, stock_code: str, quantity: int, unit_price: float) -> str:
+    """Single-line version of ``classify`` for already-validated lines (the stream consumer).
+
+    Same precedence, minus the schema checks, which the event contract already enforces.
+    ``tests/unit/test_data_cleaning.py`` checks both versions agree on every combination.
+    """
+    if invoice.startswith("A"):
+        return BAD_DEBT
+    if not _PRODUCT_CODE_RE.match(stock_code):
+        return NON_PRODUCT
+    if invoice.startswith("C"):
+        return CANCELLATION_RETURN if quantity < 0 else INVALID
+    if quantity <= 0:
+        return STOCK_ADJUSTMENT
+    if unit_price <= 0:
+        return ZERO_PRICE
+    return SALE
 
 
 def match_order_reversals(df: pd.DataFrame) -> pd.DataFrame:

@@ -206,3 +206,18 @@ def test_committed_json_schema_matches_the_model():
         "Event schema changed: regenerate schemas/transaction_event.v1.json "
         "(and bump the schema version if the change is breaking)"
     )
+
+
+def test_open_batch_is_committed_when_it_gets_old(make_raw):
+    # 20 events one minute apart at speed 600: 0.1 s waits, below the commit-before-wait
+    # threshold, so only the batch-age rule (0.5 s) makes them visible before the batch fills.
+    rows = [
+        (f"5{i:05d}", "22222", "MUG", 1, f"2011-03-01 10:{i:02d}", 1.0, 1.0, "UK")
+        for i in range(20)
+    ]
+    sink = InMemorySink()
+    config = ReplayConfig(mode="accelerated", speed=600, batch_size=1000, max_batch_age_seconds=0.5)
+    replay(prepare(make_raw(rows)), sink, config, FakeClock())
+    assert sink.commits >= 3  # 1.9 s of replay -> a commit at least every 0.5 s, plus the last
+    seqs = sorted(int(h["sequence"]) for _, _, _, h in sink.committed)
+    assert seqs == list(range(20))
