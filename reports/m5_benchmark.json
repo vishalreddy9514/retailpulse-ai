@@ -1,0 +1,473 @@
+{
+  "dataset": {
+    "store": "CA_1",
+    "name": "M5 Forecasting (Walmart), evaluation files",
+    "source": "https://github.com/Nixtla/m5-forecasts/raw/main/datasets/m5.zip",
+    "sha256": "cc704ba15d6802f8262e6ec7d4c6041e4ad6366a94365e8c84f721e450eed774",
+    "items": 3049,
+    "days": 1964,
+    "first_day": "2011-01-29",
+    "last_day": "2016-06-19",
+    "zero_share_after_first_sale": 0.5497
+  },
+  "splits": {
+    "train": {
+      "last_target": "2016-04-24",
+      "first_origin": "2014-04-25",
+      "rows": 2155324
+    },
+    "validation": {
+      "targets": [
+        "2016-04-25",
+        "2016-05-22"
+      ]
+    },
+    "test": {
+      "targets": [
+        "2016-05-23",
+        "2016-06-19"
+      ]
+    }
+  },
+  "config_selection": {
+    "tweedie_1.2": {
+      "best_iteration": 298,
+      "validation_wape": 0.6935
+    },
+    "tweedie_1.5": {
+      "best_iteration": 1891,
+      "validation_wape": 0.6893
+    },
+    "poisson": {
+      "best_iteration": 361,
+      "validation_wape": 0.6948
+    }
+  },
+  "selected_config": "tweedie_1.5",
+  "validation": {
+    "segments": {
+      "model": {
+        "rows": 597604,
+        "products": 3049,
+        "actual_units": 938224,
+        "methods": {
+          "zero": {
+            "rows": 597604,
+            "mae": 1.57,
+            "rmse": 3.9247,
+            "wape": 1.0,
+            "bias": -1.0,
+            "by_horizon": {
+              "1": 1.0,
+              "2": 1.0,
+              "3": 1.0,
+              "4": 1.0,
+              "5": 1.0,
+              "6": 1.0,
+              "7": 1.0
+            }
+          },
+          "seasonal_naive": {
+            "rows": 597604,
+            "mae": 1.363,
+            "rmse": 2.7358,
+            "wape": 0.8682,
+            "bias": -0.0111,
+            "by_horizon": {
+              "1": 0.8682,
+              "2": 0.8682,
+              "3": 0.8682,
+              "4": 0.8682,
+              "5": 0.8682,
+              "6": 0.8682,
+              "7": 0.8682
+            }
+          },
+          "moving_average_28": {
+            "rows": 597604,
+            "mae": 1.1391,
+            "rmse": 2.2288,
+            "wape": 0.7256,
+            "bias": -0.0355,
+            "by_horizon": {
+              "1": 0.719,
+              "2": 0.7216,
+              "3": 0.7236,
+              "4": 0.7252,
+              "5": 0.7272,
+              "6": 0.7299,
+              "7": 0.7324
+            }
+          },
+          "lightgbm": {
+            "rows": 597604,
+            "mae": 1.0822,
+            "rmse": 2.0832,
+            "wape": 0.6893,
+            "bias": -0.0594,
+            "by_horizon": {
+              "1": 0.6766,
+              "2": 0.6841,
+              "3": 0.6884,
+              "4": 0.6907,
+              "5": 0.6923,
+              "6": 0.6951,
+              "7": 0.6981
+            }
+          },
+          "pipeline": {
+            "rows": 597604,
+            "mae": 1.0822,
+            "rmse": 2.0832,
+            "wape": 0.6893,
+            "bias": -0.0594,
+            "by_horizon": {
+              "1": 0.6766,
+              "2": 0.6841,
+              "3": 0.6884,
+              "4": 0.6907,
+              "5": 0.6923,
+              "6": 0.6951,
+              "7": 0.6981
+            }
+          }
+        }
+      },
+      "all": {
+        "rows": 597604,
+        "products": 3049,
+        "actual_units": 938224,
+        "methods": {
+          "zero": {
+            "rows": 597604,
+            "mae": 1.57,
+            "rmse": 3.9247,
+            "wape": 1.0,
+            "bias": -1.0,
+            "by_horizon": {
+              "1": 1.0,
+              "2": 1.0,
+              "3": 1.0,
+              "4": 1.0,
+              "5": 1.0,
+              "6": 1.0,
+              "7": 1.0
+            }
+          },
+          "seasonal_naive": {
+            "rows": 597604,
+            "mae": 1.363,
+            "rmse": 2.7358,
+            "wape": 0.8682,
+            "bias": -0.0111,
+            "by_horizon": {
+              "1": 0.8682,
+              "2": 0.8682,
+              "3": 0.8682,
+              "4": 0.8682,
+              "5": 0.8682,
+              "6": 0.8682,
+              "7": 0.8682
+            }
+          },
+          "moving_average_28": {
+            "rows": 597604,
+            "mae": 1.1391,
+            "rmse": 2.2288,
+            "wape": 0.7256,
+            "bias": -0.0355,
+            "by_horizon": {
+              "1": 0.719,
+              "2": 0.7216,
+              "3": 0.7236,
+              "4": 0.7252,
+              "5": 0.7272,
+              "6": 0.7299,
+              "7": 0.7324
+            }
+          },
+          "pipeline": {
+            "rows": 597604,
+            "mae": 1.0822,
+            "rmse": 2.0832,
+            "wape": 0.6893,
+            "bias": -0.0594,
+            "by_horizon": {
+              "1": 0.6766,
+              "2": 0.6841,
+              "3": 0.6884,
+              "4": 0.6907,
+              "5": 0.6923,
+              "6": 0.6951,
+              "7": 0.6981
+            }
+          }
+        }
+      }
+    }
+  },
+  "test": {
+    "segments": {
+      "model": {
+        "rows": 597604,
+        "products": 3049,
+        "actual_units": 937909,
+        "methods": {
+          "zero": {
+            "rows": 597604,
+            "mae": 1.5694,
+            "rmse": 4.0565,
+            "wape": 1.0,
+            "bias": -1.0,
+            "by_horizon": {
+              "1": 1.0,
+              "2": 1.0,
+              "3": 1.0,
+              "4": 1.0,
+              "5": 1.0,
+              "6": 1.0,
+              "7": 1.0
+            }
+          },
+          "seasonal_naive": {
+            "rows": 597604,
+            "mae": 1.3719,
+            "rmse": 2.8982,
+            "wape": 0.8741,
+            "bias": 0.0063,
+            "by_horizon": {
+              "1": 0.8741,
+              "2": 0.8741,
+              "3": 0.8741,
+              "4": 0.8741,
+              "5": 0.8741,
+              "6": 0.8741,
+              "7": 0.8741
+            }
+          },
+          "moving_average_28": {
+            "rows": 597604,
+            "mae": 1.1716,
+            "rmse": 2.3451,
+            "wape": 0.7465,
+            "bias": 0.0046,
+            "by_horizon": {
+              "1": 0.7373,
+              "2": 0.7406,
+              "3": 0.7441,
+              "4": 0.7469,
+              "5": 0.7495,
+              "6": 0.7524,
+              "7": 0.755
+            }
+          },
+          "lightgbm": {
+            "rows": 597604,
+            "mae": 1.1102,
+            "rmse": 2.1841,
+            "wape": 0.7074,
+            "bias": -0.0078,
+            "by_horizon": {
+              "1": 0.6852,
+              "2": 0.6965,
+              "3": 0.7041,
+              "4": 0.7095,
+              "5": 0.7137,
+              "6": 0.7192,
+              "7": 0.7233
+            }
+          },
+          "pipeline": {
+            "rows": 597604,
+            "mae": 1.1102,
+            "rmse": 2.1841,
+            "wape": 0.7074,
+            "bias": -0.0078,
+            "by_horizon": {
+              "1": 0.6852,
+              "2": 0.6965,
+              "3": 0.7041,
+              "4": 0.7095,
+              "5": 0.7137,
+              "6": 0.7192,
+              "7": 0.7233
+            }
+          }
+        }
+      },
+      "all": {
+        "rows": 597604,
+        "products": 3049,
+        "actual_units": 937909,
+        "methods": {
+          "zero": {
+            "rows": 597604,
+            "mae": 1.5694,
+            "rmse": 4.0565,
+            "wape": 1.0,
+            "bias": -1.0,
+            "by_horizon": {
+              "1": 1.0,
+              "2": 1.0,
+              "3": 1.0,
+              "4": 1.0,
+              "5": 1.0,
+              "6": 1.0,
+              "7": 1.0
+            }
+          },
+          "seasonal_naive": {
+            "rows": 597604,
+            "mae": 1.3719,
+            "rmse": 2.8982,
+            "wape": 0.8741,
+            "bias": 0.0063,
+            "by_horizon": {
+              "1": 0.8741,
+              "2": 0.8741,
+              "3": 0.8741,
+              "4": 0.8741,
+              "5": 0.8741,
+              "6": 0.8741,
+              "7": 0.8741
+            }
+          },
+          "moving_average_28": {
+            "rows": 597604,
+            "mae": 1.1716,
+            "rmse": 2.3451,
+            "wape": 0.7465,
+            "bias": 0.0046,
+            "by_horizon": {
+              "1": 0.7373,
+              "2": 0.7406,
+              "3": 0.7441,
+              "4": 0.7469,
+              "5": 0.7495,
+              "6": 0.7524,
+              "7": 0.755
+            }
+          },
+          "pipeline": {
+            "rows": 597604,
+            "mae": 1.1102,
+            "rmse": 2.1841,
+            "wape": 0.7074,
+            "bias": -0.0078,
+            "by_horizon": {
+              "1": 0.6852,
+              "2": 0.6965,
+              "3": 0.7041,
+              "4": 0.7095,
+              "5": 0.7137,
+              "6": 0.7192,
+              "7": 0.7233
+            }
+          }
+        }
+      }
+    }
+  },
+  "test_cumulative_7day": {
+    "model": {
+      "zero": {
+        "rows": 67078,
+        "mae": 11.1588,
+        "rmse": 25.2648,
+        "wape": 1.0,
+        "bias": -1.0
+      },
+      "seasonal_naive": {
+        "rows": 67078,
+        "mae": 4.4924,
+        "rmse": 9.7655,
+        "wape": 0.4026,
+        "bias": -0.0081
+      },
+      "moving_average_28": {
+        "rows": 67078,
+        "mae": 4.1687,
+        "rmse": 9.5472,
+        "wape": 0.3736,
+        "bias": -0.0104
+      },
+      "lightgbm": {
+        "rows": 67078,
+        "mae": 3.8331,
+        "rmse": 8.6239,
+        "wape": 0.3435,
+        "bias": -0.0185
+      },
+      "pipeline": {
+        "rows": 67078,
+        "mae": 3.8331,
+        "rmse": 8.6239,
+        "wape": 0.3435,
+        "bias": -0.0185
+      }
+    },
+    "all": {
+      "zero": {
+        "rows": 67078,
+        "mae": 11.1588,
+        "rmse": 25.2648,
+        "wape": 1.0,
+        "bias": -1.0
+      },
+      "seasonal_naive": {
+        "rows": 67078,
+        "mae": 4.4924,
+        "rmse": 9.7655,
+        "wape": 0.4026,
+        "bias": -0.0081
+      },
+      "moving_average_28": {
+        "rows": 67078,
+        "mae": 4.1687,
+        "rmse": 9.5472,
+        "wape": 0.3736,
+        "bias": -0.0104
+      },
+      "pipeline": {
+        "rows": 67078,
+        "mae": 3.8331,
+        "rmse": 8.6239,
+        "wape": 0.3435,
+        "bias": -0.0185
+      }
+    }
+  },
+  "test_rmsse": {
+    "zero": {
+      "items": 3049,
+      "items_without_scale": 0,
+      "rmsse_mean": 0.9628,
+      "rmsse_revenue_weighted": 1.3147
+    },
+    "seasonal_naive": {
+      "items": 3049,
+      "items_without_scale": 0,
+      "rmsse_mean": 1.0012,
+      "rmsse_revenue_weighted": 1.0758
+    },
+    "moving_average_28": {
+      "items": 3049,
+      "items_without_scale": 0,
+      "rmsse_mean": 0.7463,
+      "rmsse_revenue_weighted": 0.8434
+    },
+    "lightgbm": {
+      "items": 3049,
+      "items_without_scale": 0,
+      "rmsse_mean": 0.7318,
+      "rmsse_revenue_weighted": 0.7978
+    },
+    "pipeline": {
+      "items": 3049,
+      "items_without_scale": 0,
+      "rmsse_mean": 0.7318,
+      "rmsse_revenue_weighted": 0.7978
+    }
+  },
+  "runtime_seconds": 1596.7
+}
