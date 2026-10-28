@@ -42,7 +42,7 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 | 8 | AI copilot (LangGraph tools and RAG) | done |
 | 9 | FastAPI backend and Streamlit dashboard | done |
 | 10 | Docker, CI/CD, logging, monitoring, docs | done |
-| — | Optional M5 forecasting benchmark | not started (see [Follow-ups](#known-limitations-and-follow-ups)) |
+| 11 | Optional M5 forecasting benchmark | done (see [M5 benchmark](#optional-benchmark-walmart-m5)) |
 
 ## Quick start (Docker)
 
@@ -147,6 +147,7 @@ src/
   dashboard/app.py, api_client.py   Streamlit dashboard, a thin client of the API
   observability.py                  JSON logging + every Prometheus metric definition
   monitoring/model_monitor.py       live forecast accuracy (out of sample), input drift, freshness
+  benchmarks/m5.py                  optional: the same forecasting pipeline on Walmart M5 data
 monitoring/                         prometheus.yml, alerts.yml, alerts_test.yml (promtool unit tests)
 Dockerfile                          multi-stage: test stage runs lint + unit tests; slim non-root runtime
 tests/e2e/dashboard.e2e.cjs         Playwright browser check of the running dashboard
@@ -648,6 +649,41 @@ python -m src.monitoring.model_monitor --origin 2011-11-15 --from-backtest   # -
   * On a fresh broker the consumer crashed with "unknown topic" because it started before any producer. It now creates the topics idempotently.
   * `apt` mirrors aren't reachable from every build network. The image now takes the one system library LightGBM needs (`libgomp.so.1`) from the official `python:3.12` image, and runs its healthcheck in Python instead of `curl`. Builds behind a TLS-inspecting proxy can pass its CA as an optional BuildKit secret (see the `Dockerfile` header); it is never stored in the image.
 
+## Optional benchmark: Walmart M5
+
+A second, independent dataset checks that the forecasting pipeline is not tuned to UCI. Nothing from M5 reaches the API, copilot or dashboard.
+
+* **Data.** The M5 Forecasting competition files (Makridakis, Spiliotis & Assimakopoulos, *IJF* 38(4), 2022). They are read from the zip mirrored by Nixtla ([github.com/Nixtla/m5-forecasts](https://github.com/Nixtla/m5-forecasts)), checksum pinned in `src/benchmarks/m5.py`. The mirror also holds the released labels for M5's final evaluation period. The data was published for the competition under its rules; it is downloaded to `data/raw/m5/` and never committed.
+* **What runs.** The UCI pipeline unchanged: the same 35 features, the same three LightGBM configs chosen on validation WAPE, the same baselines, rolling-origin evaluation over horizons 1–7 and the same segments. Only the adapter is M5-specific:
+  * one store, CA_1 (3,049 items)
+  * items enter on their first sale
+  * Christmas Day is dropped as a non-trading day, since every store sells nothing
+  * revenue is units × weekly `sell_price`
+  * `invoices` and `customers` are missing, because M5 has no transactions
+* **No M5 extras.** SNAP days and events are deliberately not added.
+* **Splits** follow M5's own periods:
+  * train on targets up to 2016-04-24, with origins from the last two years
+  * validation from 2016-04-25 to 2016-05-22 (the public leaderboard period)
+  * test from 2016-05-23 to 2016-06-19 (the final evaluation period), scored once by a model refit on train and validation
+
+Run `python -m src.benchmarks.m5 --download`. It takes about 27 minutes on 4 cores. Full tables are in [`reports/m5_benchmark.md`](reports/m5_benchmark.md).
+
+**Measured on the test period** (597,604 forecasts, 3,049 items, 55% zero-sale days; selected config Tweedie 1.5):
+
+| method | daily MAE | daily RMSE | daily WAPE | 7-day WAPE | RMSSE (mean) | RMSSE (revenue-weighted) |
+|---|---:|---:|---:|---:|---:|---:|
+| zero | 1.569 | 4.06 | 1.000 | 1.000 | 0.963 | 1.315 |
+| seasonal naive | 1.372 | 2.90 | 0.874 | 0.403 | 1.001 | 1.076 |
+| moving average 28 | 1.172 | 2.35 | 0.747 | 0.374 | 0.746 | 0.843 |
+| **LightGBM** | **1.110** | **2.18** | **0.707** | **0.344** | **0.732** | **0.798** |
+
+**What this shows.**
+
+* **LightGBM wins on every metric**, by a wider margin than on UCI: daily MAE is 5.3% lower and 7-day MAE 8.1% lower than the moving average. Unlike on UCI, it also wins on RMSE. M5's retail demand is steadier than UCI's wholesale orders, so the features have more signal to use.
+* **The fallback for sparse products is not exercised.** By 2016 every CA_1 item has years of history, so all items are in the model segment.
+* **RMSSE is item-level** over rolling 1–7 day forecasts for one store. It is not the competition's WRMSSE (12 aggregation levels, one 28-day-ahead forecast), so it is not comparable with the Kaggle leaderboard. Mean RMSSE also rewards near-zero forecasts on intermittent items: zero scores 0.963 against seasonal naive's 1.001. That is why the revenue-weighted figure is reported too.
+* **This is one store and one test window**, from a single run.
+
 ## Known limitations and follow-ups
 
 * **Copilot not evaluated live.** The Claude path is tested with a scripted client, and offline mode scores 6/6. Run `python -m src.copilot.evaluate` with an API key to measure Claude mode (billed API calls).
@@ -657,7 +693,7 @@ python -m src.monitoring.model_monitor --origin 2011-11-15 --from-backtest   # -
 * **Security.** The API's only access control is an optional shared token on approval writes; there is no user authentication. Don't expose it publicly as is.
 * **Image size.** The single runtime image is about 1.2 GB (Streamlit, LightGBM, pandas/pyarrow, Kafka client, LangGraph). Per-service images would shrink it.
 * **Scale.** The stream state is single-instance SQLite. Scaling out would mean one consumer per partition group with a shared store such as Postgres.
-* **Not done: the optional M5 benchmark.** It was left optional by design and wasn't started.
+* **M5 benchmark covers one store.** It runs on CA_1 only (3,049 items), with no SNAP or event features, and it scores item-level RMSSE, not the competition's WRMSSE. See [Optional benchmark](#optional-benchmark-walmart-m5).
 * **Licence.** The repository has no licence file yet; that choice is the owner's. The data is CC BY 4.0, with attribution above.
 
 ## Data and AI disclosure
