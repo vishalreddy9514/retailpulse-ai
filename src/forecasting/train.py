@@ -159,6 +159,31 @@ def fit(params: dict, train: lgb.Dataset, rounds: int, valid: lgb.Dataset | None
     return lgb.train(params, train, num_boost_round=rounds, callbacks=callbacks, **kwargs)
 
 
+def select_config(
+    dtrain: lgb.Dataset,
+    dval: lgb.Dataset,
+    x_val: pd.DataFrame,
+    y_val: np.ndarray,
+    configs: dict[str, dict] | None = None,
+    max_rounds: int | None = None,
+) -> tuple[dict, str]:
+    """Fit each config with early stopping on validation; pick the lowest validation WAPE."""
+    configs = CONFIGS if configs is None else configs
+    max_rounds = MAX_ROUNDS if max_rounds is None else max_rounds
+    selection = {}
+    for name, cfg in configs.items():
+        booster = fit({**BASE_PARAMS, **cfg}, dtrain, max_rounds, dval)
+        score = wape(y_val, booster.predict(x_val, num_iteration=booster.best_iteration))
+        selection[name] = {
+            "best_iteration": int(booster.best_iteration),
+            "validation_wape": round(score, 4),
+        }
+        logger.info(
+            "Config %s: best_iteration=%d validation WAPE=%.4f", name, booster.best_iteration, score
+        )
+    return selection, min(selection, key=lambda k: selection[k]["validation_wape"])
+
+
 def predict_rows(panel: F.Panel, rows: Rows, booster: lgb.Booster | None) -> dict[str, np.ndarray]:
     """Forecasts from every method on the same rows. The 'pipeline' combines the segments."""
     td = target_dates(panel, rows)
@@ -260,18 +285,7 @@ def run(product_daily: pd.DataFrame) -> dict:
     dtrain = lgb.Dataset(x_train, y_train, free_raw_data=False)
     dval = lgb.Dataset(x_val, y_val, reference=dtrain, free_raw_data=False)
 
-    selection = {}
-    for name, cfg in CONFIGS.items():
-        booster = fit({**BASE_PARAMS, **cfg}, dtrain, MAX_ROUNDS, dval)
-        score = wape(y_val, booster.predict(x_val, num_iteration=booster.best_iteration))
-        selection[name] = {
-            "best_iteration": int(booster.best_iteration),
-            "validation_wape": round(score, 4),
-        }
-        logger.info(
-            "Config %s: best_iteration=%d validation WAPE=%.4f", name, booster.best_iteration, score
-        )
-    best_name = min(selection, key=lambda k: selection[k]["validation_wape"])
+    selection, best_name = select_config(dtrain, dval, x_val, y_val)
     params = {**BASE_PARAMS, **CONFIGS[best_name]}
     rounds = selection[best_name]["best_iteration"]
 
