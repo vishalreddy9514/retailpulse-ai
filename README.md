@@ -18,7 +18,7 @@ Built phase by phase. Each phase lands on its own branch and pull request.
 | 2 | Data cleaning and quality checks | done |
 | 3 | Daily product-level demand aggregation | done |
 | 4 | Forecasting models and evaluation | done |
-| 5 | Kafka historical event replay (producer) | planned |
+| 5 | Kafka historical event replay (producer) | done |
 | 6 | Streaming processing pipeline (consumer) | planned |
 | 7 | Synthetic inventory and stockout risk | planned |
 | 8 | AI copilot (LangGraph tools and RAG) | planned |
@@ -40,7 +40,7 @@ python -m src.forecasting.train             # ~15 min on 4 cores: select, evalua
 python -m src.forecasting.predict           # next 1-7 trading days for every product (~20 s)
 python -m src.ingestion.explore             # regenerate reports/data_profile.md
 
-pytest                                      # unit tests (no download needed)
+pytest                                      # unit tests (no download, no broker needed)
 ruff check src tests
 ```
 
@@ -91,6 +91,12 @@ src/
   forecasting/metrics.py            MAE, RMSE, WAPE, bias
   forecasting/train.py              chronological splits, config selection, evaluation, persistence
   forecasting/predict.py            reproducible inference from the saved model
+  streaming/schema.py               event contract (pydantic), dead-letter payload
+  streaming/replay.py               broker-independent replay engine: order, pacing, resume
+  streaming/kafka_producer.py       transactional Kafka sink + CLI
+schemas/transaction_event.v1.json   JSON Schema of the event contract (checked by a test)
+docker-compose.yml                  single-node Kafka (KRaft) for local development
+tests/integration/                  tests against a real broker (opt-in)
 tests/unit/                         pytest suites on small hand-written fixtures
 reports/                            generated, committed: data profile, cleaning, aggregation, forecast evaluation
 models/                             trained model + metadata (git-ignored, rebuilt by train.py)
@@ -274,6 +280,57 @@ Output: `data/processed/forecasts_<origin>.parquet`, with one row per product ×
 | `model_version`, `value_type` = `model_prediction`, `unit` | provenance, for the copilot and dashboard |
 
 At the default origin, the next trading day is 2011-12-09. That day is partly observed in the source (until 12:50), so it can't be used to judge the forecast as a full day.
+
+## Simulated real-time streaming (Kafka replay)
+
+> **This is simulated real-time streaming using historical data.** `kafka_producer.py` replays the 2009–2011 UCI transactions in timestamp order. The application does **not** receive live transactions from the retailer. Every event carries `"data_origin": "historical_replay"`.
+
+```bash
+docker compose up -d --wait kafka                          # single-node Kafka 3.9.1 on localhost:9092
+
+python -m src.streaming.kafka_producer --dry-run           # validate every event, no broker
+python -m src.streaming.kafka_producer --mode fast --start 2010-12-01 --end 2010-12-03
+python -m src.streaming.kafka_producer --mode accelerated --speed 3600 --max-gap 2   # 1 h of history per second
+python -m src.streaming.kafka_producer --mode fast --rate 500                        # fast, capped at 500 events/s
+
+RETAILPULSE_KAFKA_BOOTSTRAP=localhost:9092 pytest -m integration                     # real-broker tests
+```
+
+### Event contract
+
+Topic `retail.transactions.v1` has 6 partitions and is keyed by `stock_code`, so each product's events stay in order within a partition. The payload is JSON, validated by `TransactionEvent` ([`schemas/transaction_event.v1.json`](schemas/transaction_event.v1.json)):
+
+| field | meaning |
+|---|---|
+| `event_time` | the **original** invoice timestamp, unchanged (UK local time as recorded; the source has no timezone) |
+| `ingestion_time` | UTC wall-clock time the event was published. The consumer uses it to measure processing latency |
+| `event_id` | deterministic id from the normalised line, the **same id the batch pipeline gives the cleaned row** |
+| `sequence` | position in the canonical replay order (event time, sheet, row) across the whole dataset |
+| `invoice`, `stock_code`, `description`, `quantity`, `unit_price`, `customer_id`, `country` | the raw line, including cancellations and adjustments. Classification happens in the consumer, with the batch rules |
+| `source_sheet`, `source_row`, `replay_run_id`, `schema_version`, `data_origin` | lineage and provenance |
+
+Records that fail validation (bad invoice number, missing quantity or price, non-finite price, missing timestamp, and so on) go to `retail.transactions.dlq.v1` with the raw values and the list of errors. They are never dropped silently. On the real file, **all 1,044,848 lines pass validation**, consistent with the cleaning stage's 0 invalid rows. Unit tests inject malformed records to exercise the dead-letter path.
+
+### Restart without duplicates
+
+* **Transactional, atomic batches.** Each batch (default 1,000 events), including its dead-letter records, is committed in one Kafka transaction. A crash or Ctrl-C aborts the open batch, so consumers reading with `isolation.level=read_committed` never see half a batch.
+* **The checkpoint lives in Kafka.** On start, the producer first calls `init_transactions`, which fences any older producer with the same `transactional.id` and aborts its open transaction. It then reads the highest committed `sequence` on both topics and resumes after it. There is no local checkpoint file to lose or fall out of sync.
+* **Re-replaying on purpose** (`--from-start`) publishes events again with the **same `event_id`s**. The phase 6 consumer de-duplicates on `event_id`, which also removes the raw file's exact-duplicate lines, as the batch cleaning does.
+
+Verified on the real broker:
+
+* Four runs over 2010-12-01 to 12-14: a fast run; an identical rerun (published 0); an accelerated run interrupted with Ctrl-C mid-batch (aborted, committed up to sequence 522,593); and a resume (started at 522,594).
+* A `read_committed` consumer then found **31,102 messages, exactly the 31,102 expected, with 0 duplicate sequences and 0 gaps**. Every payload validated against the schema, the key matched the stock code, and 100% of `event_id`s matched the batch-cleaned table. The 439 repeated `event_id`s are exactly the raw exact-duplicate lines in that window.
+* The integration test (`tests/integration/`) checks the same crash → resume → exactly-once behaviour automatically, and CI runs it against a Kafka container.
+
+### Pacing
+
+| mode | behaviour |
+|---|---|
+| `fast` | as fast as possible: about **25,000 events/s** measured locally with transactions (99,602 events in 3.9 s), so the full history replays in under a minute. `--rate N` caps it at N events/s |
+| `accelerated` | the wait between events is the event-time gap ÷ `--speed`, capped at `--max-gap` seconds, so nights, weekends and Christmas don't stall a demo. `--speed 1` replays at the original pace |
+
+Before any wait of 0.25 s or longer, the open batch is committed, so consumers see events promptly in slow replays.
 
 ## Data and AI disclosure
 
