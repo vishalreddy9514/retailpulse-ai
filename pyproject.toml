@@ -3,6 +3,8 @@ name = "retailpulse-ai"
 version = "0.1.0"
 description = "RetailPulse AI - retail demand forecasting copilot built on simulated real-time replay of UCI Online Retail II"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "pandas>=2.2",
