@@ -694,7 +694,10 @@ Run `python -m src.benchmarks.m5 --download`. It takes about 27 minutes on 4 cor
 * **Image size.** The single runtime image is about 1.2 GB (Streamlit, LightGBM, pandas/pyarrow, Kafka client, LangGraph). Per-service images would shrink it.
 * **Scale.** The stream state is single-instance SQLite. Scaling out would mean one consumer per partition group with a shared store such as Postgres.
 * **M5 benchmark covers one store.** It runs on CA_1 only (3,049 items), with no SNAP or event features, and it scores item-level RMSSE, not the competition's WRMSSE. See [Optional benchmark](#optional-benchmark-walmart-m5).
-* **Licence.** The repository has no licence file yet; that choice is the owner's. The data is CC BY 4.0, with attribution above.
+
+## Licence
+
+The code is released under the [MIT License](LICENSE). The datasets are not part of the repository and keep their own terms: UCI Online Retail II is CC BY 4.0 (attribution above), and the M5 data used by the optional benchmark is subject to the M5 competition's terms.
 
 ## Data and AI disclosure
 
